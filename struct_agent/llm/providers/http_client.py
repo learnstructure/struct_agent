@@ -118,6 +118,15 @@ class NativeHTTPProvider(BaseLLMProvider):
         endpoints, this delegates to generate() and yields chunk events.
         """
         resp = self.generate(messages, tools, temperature)
-        if resp.content:
-            yield TextChunkEvent(resp.content)
+        content = resp.content or ""
+        if "<think>" in content and "</think>" in content:
+            parts = content.split("</think>", 1)
+            thought_part = parts[0].replace("<think>", "").strip()
+            final_content = parts[1].strip()
+            if thought_part:
+                yield ThoughtEvent(thought_part)
+            if final_content:
+                yield TextChunkEvent(final_content)
+        elif content:
+            yield TextChunkEvent(content)
         return resp

@@ -32,7 +32,30 @@ def get_provider(
     """
     p_lower = provider.lower().strip()
 
-    if p_lower in ("native", "openai", "ollama", "groq", "deepseek"):
+    # Ollama provider or models tagged with ollama/ or local ollama base
+    if p_lower == "ollama" or model.startswith("ollama/") or (api_base and "11434" in api_base):
+        clean_model = model[7:] if model.startswith("ollama/") else model
+        import os
+        base = api_base or os.environ.get("OLLAMA_API_BASE") or os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+        if not base.endswith("/v1"):
+            base = f"{base.rstrip('/')}/v1"
+        key = api_key or "ollama"
+        return NativeHTTPProvider(model=clean_model, api_key=key, api_base=base)
+
+    # Google Gemini direct support (uses litellm if installed, else native Google OpenAI-compatible endpoint)
+    if p_lower == "gemini" or ("gemini" in model.lower() and p_lower in ("auto", "gemini")):
+        import os
+        key = api_key or os.environ.get("GEMINI_API_KEY", "")
+        try:
+            from .litellm_client import LiteLLMProvider
+            return LiteLLMProvider(model=model, api_key=key, api_base=api_base)
+        except ImportError:
+            pass
+        clean_model = model[7:] if model.startswith("gemini/") else model
+        base = api_base or "https://generativelanguage.googleapis.com/v1beta/openai"
+        return NativeHTTPProvider(model=clean_model, api_key=key, api_base=base)
+
+    if p_lower in ("native", "openai", "groq", "deepseek"):
         return NativeHTTPProvider(model=model, api_key=api_key, api_base=api_base)
 
     if p_lower == "litellm":
@@ -40,8 +63,8 @@ def get_provider(
         return LiteLLMProvider(model=model, api_key=api_key, api_base=api_base)
 
     if p_lower == "auto":
-        # Check if model requires litellm (e.g. gemini/ or claude-)
-        if "/" in model or "claude" in model or "gemini" in model:
+        # Check if model requires litellm (e.g. claude-)
+        if "/" in model or "claude" in model:
             try:
                 from .litellm_client import LiteLLMProvider
                 return LiteLLMProvider(model=model, api_key=api_key, api_base=api_base)
@@ -49,7 +72,7 @@ def get_provider(
                 pass
         return NativeHTTPProvider(model=model, api_key=api_key, api_base=api_base)
 
-    raise ValueError(f"Unknown provider: {provider!r}. Choose 'native', 'litellm', or 'auto'.")
+    raise ValueError(f"Unknown provider: {provider!r}. Choose 'native', 'ollama', 'gemini', 'litellm', or 'auto'.")
 
 
 __all__ = [

@@ -16,6 +16,8 @@ from ..state.project_state import ProjectState, WorkflowStage
 from ..tools import (
     apply_gravity_loads,
     apply_lateral_loads,
+    build_structural_model,
+    create_frame_model,
     create_project,
     export_to_etabs,
     export_to_sap2000,
@@ -29,6 +31,9 @@ from ..tools import (
     modify_project,
     preliminary_sizing,
     run_analysis,
+    inspect_analysis_results,
+    run_time_history,
+    inspect_dynamic_results,
     run_design,
 )
 from ..validation.model import validate_model
@@ -113,6 +118,8 @@ class AgentRunner:
 
         # Register callable tools
         self._tool_map: Dict[str, Callable] = {
+            "create_frame_model": create_frame_model,
+            "build_structural_model": build_structural_model,
             "create_project": create_project,
             "inspect_project": inspect_project,
             "modify_project": modify_project,
@@ -123,6 +130,8 @@ class AgentRunner:
             "validate_model": validate_model,
             "run_analysis": run_analysis,
             "inspect_analysis_results": inspect_analysis_results,
+            "run_time_history": run_time_history,
+            "inspect_dynamic_results": inspect_dynamic_results,
             "run_design": run_design,
             "inspect_design_results": inspect_design_results,
             "generate_drawings": generate_drawings,
@@ -153,6 +162,7 @@ class AgentRunner:
 
         # Tools that need project passed as first parameter or kwarg
         project_consumer_tools = {
+            "build_structural_model",
             "inspect_project",
             "modify_project",
             "preliminary_sizing",
@@ -162,6 +172,8 @@ class AgentRunner:
             "validate_model",
             "run_analysis",
             "inspect_analysis_results",
+            "run_time_history",
+            "inspect_dynamic_results",
             "run_design",
             "inspect_design_results",
             "generate_drawings",
@@ -290,6 +302,7 @@ class AgentRunner:
             total_turns=turn_count,
             governing_dcr=governing_dcr,
             passed=passed,
+            project=self.project,
         )
 
         return final_answer

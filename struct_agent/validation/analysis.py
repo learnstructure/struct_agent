@@ -41,6 +41,6 @@ def validate_analysis(analysis_result: Any) -> ToolResult:
         "validate_analysis",
         data={
             "analysis_case_id": getattr(analysis_result, "analysis_case_id", None),
-            "n_element_results": len(element_results),
+            "n_element_results": len(element_results) if element_results else 0,
         },
     )

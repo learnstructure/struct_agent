@@ -109,9 +109,18 @@ class TextChunkEvent(LLMEvent):
 
     chunk: str = ""
 
-    def __init__(self, chunk: str):
+    def __init__(self, chunk: str = "", delta: Optional[str] = None):
         super().__init__(event_type=EventType.TEXT_CHUNK)
-        self.chunk = chunk
+        self.chunk = delta if (delta is not None and not chunk) else chunk
+
+    @property
+    def delta(self) -> str:
+        """Alias for .chunk for compatibility with streaming delta conventions."""
+        return self.chunk
+
+    @delta.setter
+    def delta(self, val: str) -> None:
+        self.chunk = val
 
 
 @dataclass
@@ -135,6 +144,7 @@ class CompleteEvent(LLMEvent):
     total_turns: int = 0
     governing_dcr: Optional[float] = None
     passed: Optional[bool] = None
+    project: Any = None
 
     def __init__(
         self,
@@ -142,9 +152,11 @@ class CompleteEvent(LLMEvent):
         total_turns: int,
         governing_dcr: Optional[float] = None,
         passed: Optional[bool] = None,
+        project: Any = None,
     ):
         super().__init__(event_type=EventType.COMPLETE)
         self.final_message = final_message
         self.total_turns = total_turns
         self.governing_dcr = governing_dcr
         self.passed = passed
+        self.project = project

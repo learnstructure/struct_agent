@@ -16,8 +16,6 @@ from .base import AgentError, ToolResult
 
 def _detect_solver(project: Any, analysis_type: str = "static") -> str:
     """Detect whether a model requires fem2d or fem3d."""
-    if analysis_type == "modal":
-        return "fem3d"
     model = getattr(project, "model", None)
     if model is None:
         return "fem2d"
@@ -90,229 +88,142 @@ def run_analysis(
         )
 
     # -------------------------------------------------------------
-    # fem2d branch
+    # Static Analysis with Linear Superposition & Enveloping
     # -------------------------------------------------------------
-    if resolved_solver == "fem2d":
-        if analysis_type != "static":
-            return ToolResult.failure(
-                "run_analysis",
-                AgentError(
-                    error_type="unsupported_analysis_type",
-                    message=f"fem2d only supports analysis_type='static', got {analysis_type!r}.",
-                    possible_causes=["Use solver='fem3d' for modal analysis"],
-                ),
-            )
+    if analysis_type == "static":
+        from struct_core.analysis_result import envelope_results, superpose_results
 
-        try:
-            from fem2d.adapters import model_from_core, result_to_core, solve_combinations_and_envelope
-        except Exception as exc:  # pragma: no cover - environment guard
-            return ToolResult.failure(
-                "run_analysis",
-                AgentError(
-                    error_type="dependency_error",
-                    message=f"fem2d adapters are unavailable: {exc}",
-                    possible_causes=["fem2d is not installed in the active environment"],
-                ),
-            )
+        def _solve_single_case(proj: Any, solver_name: str, target_lc_id: Optional[str]) -> Any:
+            if solver_name == "fem2d":
+                from fem2d.adapters import model_from_core, result_to_core
+                struct = model_from_core(proj, load_case_id=target_lc_id)
+                struct.solve()
+                return result_to_core(struct, analysis_case_id=target_lc_id or "LCASE1")
+            else:
+                from fem3d.adapters import model_from_core as fem3d_model_from_core
+                from fem3d.adapters import result_to_core as fem3d_result_to_core
+                struct = fem3d_model_from_core(proj, load_case_id=target_lc_id)
+                struct.solve()
+                res = fem3d_result_to_core(struct)
+                res.analysis_case_id = target_lc_id or "LCASE1"
+                return res
 
-        use_envelope = (
-            (isinstance(load_case_id, str) and load_case_id.lower() == "envelope")
-            or (load_case_id is None and bool(getattr(project.model, "load_combinations", [])))
-        )
+        load_cases = list(getattr(project.model, "load_cases", []))
+        load_combinations = list(getattr(project.model, "load_combinations", []))
+        comb_map = {c.id: c for c in load_combinations}
+        is_single_comb = load_case_id in comb_map
 
-        if use_envelope:
+        if (
+            load_case_id
+            and not is_single_comb
+            and str(load_case_id).upper() not in ("ALL", "TOTAL", "ENVELOPE")
+        ):
             try:
-                _, analysis_result = solve_combinations_and_envelope(
-                    project, envelope_case_id=analysis_case_id
-                )
+                analysis_result = _solve_single_case(project, resolved_solver, load_case_id)
+                project.analysis_results[load_case_id] = analysis_result
+                project.analysis_results[analysis_case_id] = analysis_result
             except Exception as exc:
                 return ToolResult.failure(
                     "run_analysis",
                     AgentError(
                         error_type="solver_failure",
-                        message=f"fem2d combination/envelope solver failed: {exc}",
-                        possible_causes=["Zero-stiffness mechanism or invalid combination"],
+                        message=f"{resolved_solver} solver failed on case {load_case_id!r}: {exc}",
+                        possible_causes=["Zero-stiffness mechanism or invalid loading"],
                     ),
                 )
         else:
-            try:
-                structure = model_from_core(project, load_case_id=load_case_id)
-            except Exception as exc:
-                return ToolResult.failure(
-                    "run_analysis",
-                    AgentError(
-                        error_type="model_conversion_error",
-                        message=f"struct_core -> fem2d conversion failed: {exc}",
-                        possible_causes=[
-                            "Section/material schema is not recognized by fem2d",
-                            "Element type is not supported by the fem2d adapter",
-                        ],
-                    ),
-                )
-
-            try:
-                structure.solve()
-            except Exception as exc:
-                return ToolResult.failure(
-                    "run_analysis",
-                    AgentError(
-                        error_type="solver_failure",
-                        message=f"fem2d solver failed: {exc}",
-                        possible_causes=[
-                            "Insufficient boundary conditions",
-                            "Disconnected structural component",
-                            "Structural mechanism (zero-stiffness DOF)",
-                        ],
-                    ),
-                )
-
-            try:
-                analysis_result = result_to_core(structure, analysis_case_id=analysis_case_id)
-            except Exception as exc:
-                return ToolResult.failure(
-                    "run_analysis",
-                    AgentError(
-                        error_type="result_conversion_error",
-                        message=f"fem2d -> struct_core conversion failed: {exc}",
-                        possible_causes=[
-                            "Adapter mismatch with the installed fem2d version",
-                        ],
-                    ),
-                )
-
-    # -------------------------------------------------------------
-    # fem3d branch
-    # -------------------------------------------------------------
-    else:
-        try:
-            from fem3d.adapters import model_from_core as fem3d_model_from_core
-            from fem3d.adapters import result_to_core as fem3d_result_to_core
-        except Exception as exc:  # pragma: no cover - environment guard
-            return ToolResult.failure(
-                "run_analysis",
-                AgentError(
-                    error_type="dependency_error",
-                    message=f"fem3d adapters are unavailable: {exc}",
-                    possible_causes=["fem3d is not installed in the active environment"],
-                ),
-            )
-
-        if analysis_type == "static":
-            use_envelope = (
-                (isinstance(load_case_id, str) and load_case_id.lower() == "envelope")
-                or (load_case_id is None and bool(getattr(project.model, "load_combinations", [])))
-            )
-
-            if use_envelope and getattr(project.model, "load_combinations", None):
-                # Solve each combination and create envelope
-                try:
-                    comb_results = []
-                    for comb in project.model.load_combinations:
-                        s3d = fem3d_model_from_core(project, load_combination_id=comb.id)
-                        s3d.solve()
-                        res = fem3d_result_to_core(s3d)
-                        comb_results.append(res)
-
-                    if not comb_results:
+            # 1. Solve each primary load case independently
+            case_results = {}
+            if load_cases:
+                for lc in load_cases:
+                    try:
+                        res_lc = _solve_single_case(project, resolved_solver, lc.id)
+                        case_results[lc.id] = res_lc
+                        project.analysis_results[lc.id] = res_lc
+                    except Exception as exc:
                         return ToolResult.failure(
                             "run_analysis",
                             AgentError(
-                                error_type="empty_result",
-                                message="No combinations could be evaluated in fem3d.",
-                                possible_causes=["Empty load combinations list"],
+                                error_type="solver_failure",
+                                message=f"{resolved_solver} solver failed on case {lc.id!r}: {exc}",
+                                possible_causes=["Zero-stiffness mechanism or unstable support"],
                             ),
                         )
-
-                    # Envelope element results
-                    first_res = comb_results[0]
-                    enveloped_elements = {}
-                    for eid in first_res.element_results:
-                        all_res_e = [cr.element_results[eid] for cr in comb_results if eid in cr.element_results]
-                        if not all_res_e:
-                            continue
-                        max_ax = max(getattr(r, "max_axial", 0.0) or 0.0 for r in all_res_e)
-                        max_mom = max(getattr(r, "max_moment", 0.0) or 0.0 for r in all_res_e)
-                        max_sh = max(getattr(r, "max_shear", 0.0) or 0.0 for r in all_res_e)
-                        rep = all_res_e[0].model_copy(deep=True)
-                        rep.max_axial = max_ax
-                        rep.max_moment = max_mom
-                        rep.max_shear = max_sh
-                        enveloped_elements[eid] = rep
-
-                    analysis_result = first_res.model_copy(deep=True)
-                    analysis_result.analysis_case_id = analysis_case_id
-                    analysis_result.element_results = enveloped_elements
-                except Exception as exc:
-                    return ToolResult.failure(
-                        "run_analysis",
-                        AgentError(
-                            error_type="solver_failure",
-                            message=f"fem3d combination envelope failed: {exc}",
-                            possible_causes=["Zero-stiffness mechanism or invalid combination"],
-                        ),
-                    )
             else:
                 try:
-                    structure = fem3d_model_from_core(project, load_case_id=load_case_id)
-                except Exception as exc:
-                    return ToolResult.failure(
-                        "run_analysis",
-                        AgentError(
-                            error_type="model_conversion_error",
-                            message=f"struct_core -> fem3d conversion failed: {exc}",
-                            possible_causes=[
-                                "Section/material schema not recognized by fem3d",
-                                "Element type is not supported by fem3d adapter",
-                            ],
-                        ),
-                    )
-
-                try:
-                    structure.solve()
+                    res_def = _solve_single_case(project, resolved_solver, "LCASE1")
+                    case_results["LCASE1"] = res_def
+                    project.analysis_results["LCASE1"] = res_def
                 except Exception as exc:
                     return ToolResult.failure(
                         "run_analysis",
                         AgentError(
                             error_type="solver_failure",
-                            message=f"fem3d solver failed: {exc}",
-                            possible_causes=[
-                                "Insufficient boundary conditions in 3D (need 6 DOFs constrained or stable geometry)",
-                                "Zero-stiffness rotational mechanism",
-                            ],
+                            message=f"{resolved_solver} solver failed on default load case: {exc}",
+                            possible_causes=["Zero-stiffness mechanism or unstable support"],
                         ),
                     )
 
-                try:
-                    analysis_result = fem3d_result_to_core(structure)
-                    analysis_result.analysis_case_id = analysis_case_id
-                except Exception as exc:
-                    return ToolResult.failure(
-                        "run_analysis",
-                        AgentError(
-                            error_type="result_conversion_error",
-                            message=f"fem3d -> struct_core conversion failed: {exc}",
-                            possible_causes=["Result conversion failed"],
-                        ),
-                    )
+            # 2. Linear Superposition for Combinations
+            if load_combinations:
+                comb_results = []
+                for comb in load_combinations:
+                    factors = {f.load_case_id: float(f.factor) for f in getattr(comb, "factors", [])}
+                    comb_res = superpose_results(case_results, factors, output_case_id=comb.id)
+                    project.analysis_results[comb.id] = comb_res
+                    comb_results.append(comb_res)
 
-        elif analysis_type == "modal":
-            try:
-                from struct_core import AnalysisResult, ModalResult, ModeShape
-            except ImportError as exc:
-                return ToolResult.failure(
-                    "run_analysis",
-                    AgentError(error_type="dependency_error", message=f"struct_core import error: {exc}"),
-                )
+                # 3. Compile Governing Envelope across combinations
+                envelope_res = envelope_results(comb_results, output_case_id=analysis_case_id)
+                project.analysis_results[analysis_case_id] = envelope_res
+                if "envelope" not in project.analysis_results:
+                    project.analysis_results["envelope"] = envelope_res
+                analysis_result = envelope_res
+            else:
+                # No combinations defined:
+                if len(case_results) > 1:
+                    total_factors = {cid: 1.0 for cid in case_results}
+                    total_res = superpose_results(case_results, total_factors, output_case_id="Total")
+                    project.analysis_results["Total"] = total_res
+                    project.analysis_results[analysis_case_id] = total_res
+                    analysis_result = total_res
+                else:
+                    first_res = next(iter(case_results.values()))
+                    project.analysis_results[analysis_case_id] = first_res
+                    analysis_result = first_res
 
-            try:
+
+    elif analysis_type == "modal":
+        try:
+            import numpy as np
+            from struct_core import AnalysisResult, ModalResult, ModeShape, NodeDisplacement
+            from structdyn import MDF
+        except ImportError as exc:
+            return ToolResult.failure(
+                "run_analysis",
+                AgentError(error_type="dependency_error", message=f"struct_core/structdyn import error: {exc}"),
+            )
+
+        try:
+            if resolved_solver == "fem2d":
+                from fem2d.adapters import model_from_core as fem2d_model_from_core
+                structure = fem2d_model_from_core(project)
+            else:
+                from fem3d.adapters import model_from_core as fem3d_model_from_core
                 structure = fem3d_model_from_core(project)
-                modal_data = structure.modal_analysis(num_modes=num_modes)
-            except Exception as exc:
+
+            structure.number_dofs()
+            structure.apply_boundary_conditions()
+            if hasattr(structure, "assemble_mass_matrix"):
+                structure.assemble_mass_matrix()
+
+            mdf = MDF.from_fem(structure)
+            if np.max(np.abs(mdf.M)) < 1e-12:
                 return ToolResult.failure(
                     "run_analysis",
                     AgentError(
                         error_type="solver_failure",
-                        message=f"fem3d modal analysis failed: {exc}",
+                        message=f"{resolved_solver} mass matrix is zero. Assign material density (rho) or nodal lumped mass.",
                         possible_causes=[
                             "Mass matrix is singular (no mass or density assigned to elements/nodes)",
                             "Unconstrained rigid-body mechanism",
@@ -320,34 +231,75 @@ def run_analysis(
                     ),
                 )
 
-            # Build ModeShape schemas
-            freqs = modal_data.get("frequencies", [])
-            periods = modal_data.get("periods", [])
-            omegas = modal_data.get("omega", [])
-            mode_shapes = []
-            for i, (freq, per, om) in enumerate(zip(freqs, periods, omegas)):
-                mode_shapes.append(
-                    ModeShape(
-                        mode_number=i + 1,
-                        period=float(per),
-                        frequency=float(freq),
-                        circular_frequency=float(om),
-                    )
-                )
-
-            analysis_result = AnalysisResult(
-                analysis_case_id=analysis_case_id,
-                modal_result=ModalResult(modes=mode_shapes),
-            )
-        else:
+            n_calc = min(num_modes, mdf.ndof)
+            omega, phi = mdf.modal.modal_analysis(n_modes=n_calc)
+        except Exception as exc:
             return ToolResult.failure(
                 "run_analysis",
                 AgentError(
-                    error_type="unsupported_analysis_type",
-                    message=f"Analysis type {analysis_type!r} is not supported. Use 'static' or 'modal'.",
-                    possible_causes=["Unsupported analysis type"],
+                    error_type="solver_failure",
+                    message=f"{resolved_solver} modal analysis failed: {exc}",
+                    possible_causes=[
+                        "Mass matrix is singular (no mass or density assigned to elements/nodes)",
+                        "Unconstrained rigid-body mechanism",
+                    ],
                 ),
             )
+
+        # Build ModeShape schemas
+        freqs = omega / (2.0 * np.pi)
+        periods = np.where(freqs > 1e-10, 1.0 / freqs, 0.0)
+        mode_shapes = []
+        for i in range(len(omega)):
+            nodal_disps = {}
+            if phi is not None and phi.shape[1] > i:
+                full_mode = np.zeros(structure.neq)
+                full_mode[structure.free_dofs] = phi[:, i]
+                max_amp = np.max(np.abs(full_mode))
+                if max_amp > 1e-12:
+                    full_mode /= max_amp
+
+                for nid, node in structure.nodes.items():
+                    dofs = getattr(node, "dofs", [])
+                    if len(dofs) == 6:
+                        nodal_disps[nid] = NodeDisplacement(
+                            ux=float(full_mode[dofs[0]]),
+                            uy=float(full_mode[dofs[1]]),
+                            uz=float(full_mode[dofs[2]]),
+                            rx=float(full_mode[dofs[3]]),
+                            ry=float(full_mode[dofs[4]]),
+                            rz=float(full_mode[dofs[5]]),
+                        )
+                    elif len(dofs) == 3:
+                        nodal_disps[nid] = NodeDisplacement(
+                            ux=float(full_mode[dofs[0]]),
+                            uy=float(full_mode[dofs[1]]),
+                            rz=float(full_mode[dofs[2]]),
+                        )
+
+            mode_shapes.append(
+                ModeShape(
+                    mode_number=i + 1,
+                    period=max(float(periods[i]), 1e-6),
+                    frequency=max(float(freqs[i]), 1e-6),
+                    circular_frequency=max(float(omega[i]), 1e-6),
+                    displacements=nodal_disps,
+                )
+            )
+
+        analysis_result = AnalysisResult(
+            analysis_case_id=analysis_case_id,
+            modal_result=ModalResult(modes=mode_shapes),
+        )
+    else:
+        return ToolResult.failure(
+            "run_analysis",
+            AgentError(
+                error_type="unsupported_analysis_type",
+                message=f"Analysis type {analysis_type!r} is not supported. Use 'static' or 'modal'.",
+                possible_causes=["Unsupported analysis type"],
+            ),
+        )
 
     project.analysis_results[analysis_case_id] = analysis_result
 
@@ -419,6 +371,14 @@ def inspect_analysis_results(project: Any, analysis_case_id: str) -> ToolResult:
             "n_modes": len(result.modal_result.modes),
             "periods": [m.period for m in result.modal_result.modes],
             "frequencies": [m.frequency for m in result.modal_result.modes],
+        }
+
+    if getattr(result, "time_history_result", None):
+        th = result.time_history_result
+        summary["time_history"] = {
+            "dt": float(th.dt),
+            "n_steps": len(th.time_steps),
+            "duration": float(th.time_steps[-1].time) if th.time_steps else 0.0,
         }
 
     return ToolResult.success("inspect_analysis_results", data=summary)

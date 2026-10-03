@@ -61,8 +61,15 @@ def run_design(
         )
 
     try:
+        target_analysis_res = None
+        if analysis_case_id:
+            target_analysis_res = project.analysis_results.get(analysis_case_id)
+            if target_analysis_res is not None:
+                project.active_analysis_case = analysis_case_id
+
         design_res, detail_res = design_from_core(
             project,
+            analysis_result=target_analysis_res,
             design_code=design_code,
         )
     except Exception as exc:

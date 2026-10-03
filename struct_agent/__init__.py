@@ -30,12 +30,18 @@ from .state.project_state import (
 from .tools.base import ToolResult, AgentError
 from .tools.model import (
     create_project,
+    create_frame_model,
+    build_structural_model,
     inspect_project,
     modify_project,
 )
 from .tools.analysis import (
     run_analysis,
     inspect_analysis_results,
+)
+from .tools.dynamics import (
+    run_time_history,
+    inspect_dynamic_results,
 )
 from .tools.design import (
     run_design,
@@ -94,6 +100,8 @@ __all__ = [
     "ToolResult",
     "AgentError",
     "create_project",
+    "create_frame_model",
+    "build_structural_model",
     "inspect_project",
     "modify_project",
     "preliminary_sizing",
@@ -103,6 +111,8 @@ __all__ = [
     "validate_model",
     "run_analysis",
     "inspect_analysis_results",
+    "run_time_history",
+    "inspect_dynamic_results",
     "run_design",
     "inspect_design_results",
     "generate_drawings",

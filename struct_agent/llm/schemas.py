@@ -12,13 +12,136 @@ ENGINEERING_TOOL_SCHEMAS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "create_frame_model",
+            "description": "Create a fully connected 2D or 3D multi-bay, multi-story structural frame with grid nodes, columns, beams, supports, and standard material/section profiles.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "num_bays": {"type": "integer", "description": "Number of horizontal bays (e.g. 2)", "default": 2},
+                    "bay_width": {"type": "number", "description": "Uniform bay width in meters (e.g. 5.0)", "default": 5.0},
+                    "num_stories": {"type": "integer", "description": "Number of vertical stories (e.g. 2)", "default": 2},
+                    "story_height": {"type": "number", "description": "Uniform story height in meters (e.g. 3.0)", "default": 3.0},
+                    "dimension": {"type": "string", "enum": ["2d", "3d"], "description": "Dimensionality: '2d' for plane frame, '3d' for space frame", "default": "2d"},
+                    "support_type": {"type": "string", "enum": ["fixed", "pinned"], "description": "Base boundary conditions", "default": "fixed"},
+                    "title": {"type": "string", "description": "Project title (e.g. '2-Bay 2-Story RC Frame')"},
+                    "col_b": {"type": "number", "description": "Column cross-section width in meters (default: 0.4)", "default": 0.4},
+                    "col_h": {"type": "number", "description": "Column cross-section depth in meters (default: 0.4)", "default": 0.4},
+                    "beam_b": {"type": "number", "description": "Beam cross-section width in meters (default: 0.3)", "default": 0.3},
+                    "beam_h": {"type": "number", "description": "Beam cross-section depth in meters (default: 0.5)", "default": 0.5},
+                },
+                "required": ["num_bays", "bay_width", "num_stories", "story_height"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_project",
-            "description": "Initialize a new structural engineering Project container with an initial StructuralModel.",
+            "description": "Initialize a new structural engineering Project container, optionally populated with complete structural model geometry (nodes, elements, materials, sections, supports).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "title": {"type": "string", "description": "Project title (e.g. '2-Story RC Office Frame')"},
                     "author": {"type": "string", "description": "Engineer or author name"},
+                    "model": {
+                        "type": "object",
+                        "description": "Structured structural model specification with nodes, elements, materials, sections, and supports.",
+                        "properties": {
+                            "nodes": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {"type": "string", "description": "Node identifier"},
+                                        "x": {"type": "number", "description": "X coordinate in meters"},
+                                        "y": {"type": "number", "description": "Y coordinate in meters"},
+                                        "z": {"type": "number", "description": "Z coordinate in meters", "default": 0.0},
+                                    },
+                                    "required": ["id", "x", "y"],
+                                },
+                            },
+                            "elements": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {"type": "string", "description": "Element identifier (e.g. 'C1', 'B1')"},
+                                        "type": {"type": "string", "enum": ["beam", "truss"], "default": "beam"},
+                                        "start_node": {"type": "string", "description": "Start node ID"},
+                                        "end_node": {"type": "string", "description": "End node ID"},
+                                        "section_id": {"type": "string", "description": "Cross-section ID"},
+                                        "material_id": {"type": "string", "description": "Material ID"},
+                                    },
+                                    "required": ["id", "start_node", "end_node"],
+                                },
+                            },
+                            "supports": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "node_id": {"type": "string", "description": "Target node ID"},
+                                        "fixity": {"type": "string", "enum": ["fixed", "pinned"], "default": "fixed"},
+                                    },
+                                    "required": ["node_id"],
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "build_structural_model",
+            "description": "Directly construct or augment structural geometry by defining nodes, elements, and supports from structured JSON.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "nodes": {
+                        "type": "array",
+                        "description": "List of grid nodes with id, x, y, z coordinates",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string"},
+                                "x": {"type": "number"},
+                                "y": {"type": "number"},
+                                "z": {"type": "number", "default": 0.0},
+                            },
+                            "required": ["id", "x", "y"],
+                        },
+                    },
+                    "elements": {
+                        "type": "array",
+                        "description": "List of structural members (columns, beams, trusses)",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string"},
+                                "type": {"type": "string", "enum": ["beam", "truss"], "default": "beam"},
+                                "start_node": {"type": "string"},
+                                "end_node": {"type": "string"},
+                                "section_id": {"type": "string"},
+                                "material_id": {"type": "string"},
+                            },
+                            "required": ["id", "start_node", "end_node"],
+                        },
+                    },
+                    "supports": {
+                        "type": "array",
+                        "description": "Boundary condition supports",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "node_id": {"type": "string"},
+                                "fixity": {"type": "string", "enum": ["fixed", "pinned"], "default": "fixed"},
+                            },
+                            "required": ["node_id"],
+                        },
+                    },
                 },
             },
         },
@@ -152,6 +275,43 @@ ENGINEERING_TOOL_SCHEMAS: List[Dict[str, Any]] = [
                 "type": "object",
                 "properties": {
                     "analysis_case_id": {"type": "string", "description": "Identifier of the analysis case to inspect"},
+                },
+                "required": ["analysis_case_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_time_history",
+            "description": "Execute dynamic earthquake time-history analysis using structdyn (Newmark-Beta / Central Difference) on 2D or 3D models with peak dynamic force enveloping for ACI 318 design.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "analysis_case_id": {"type": "string", "description": "Unique ID for storing time-history results (e.g. 'TH_ElCentro')"},
+                    "earthquake": {"type": "string", "description": "Earthquake record preset, e.g. 'elcentro'", "default": "elcentro"},
+                    "direction": {"type": "string", "enum": ["x", "y", "z"], "description": "Excitation direction", "default": "x"},
+                    "dt": {"type": "number", "description": "Time step in seconds (default: 0.02)"},
+                    "scale_factor": {"type": "number", "description": "Acceleration scale factor (auto-detected from model length unit if omitted)"},
+                    "damping_ratio": {"type": "number", "description": "Modal damping ratio (e.g. 0.05 for 5% damping)", "default": 0.05},
+                    "n_modes_damping": {"type": "integer", "description": "Number of modes for damping matrix calculation", "default": 3},
+                    "method": {"type": "string", "enum": ["newmark_beta", "central_difference"], "description": "Numerical time integration method", "default": "newmark_beta"},
+                    "solver": {"type": "string", "enum": ["auto", "fem2d", "fem3d"], "description": "Solver selection", "default": "auto"},
+                    "envelope_to_design": {"type": "boolean", "description": "Whether to envelope peak dynamic forces across all time steps for downstream ACI 318 design", "default": True},
+                },
+                "required": ["analysis_case_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "inspect_dynamic_results",
+            "description": "Inspect dynamic time-history results: time duration, peak roof drift, base shear, peak member forces, and fundamental periods.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "analysis_case_id": {"type": "string", "description": "Identifier of the dynamic analysis case to inspect"},
                 },
                 "required": ["analysis_case_id"],
             },

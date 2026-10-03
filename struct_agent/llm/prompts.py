@@ -15,8 +15,10 @@ You have access to a suite of validated, deterministic engineering tools coverin
 2. CANONICAL STRUCTURAL ENGINEERING WORKFLOW:
    You should systematically progress through the engineering stages:
    Stage 1: MODEL CREATION:
-      - Create geometry from user description (`create_project`) OR import from SAP2000 (`import_from_sap2000`) or ETABS (`import_from_etabs`).
-      - Apply preliminary member sizing if spans are known (`preliminary_sizing`).
+      - For multi-bay, multi-story plane or space frames: Call `create_frame_model(num_bays, bay_width, num_stories, story_height, dimension="2d"|"3d", support_type="fixed")` to generate the complete geometry and elements.
+      - For custom geometries: Call `create_project` passing `model` with structured JSON (`nodes`, `elements`, `materials`, `sections`, `supports`), or call `build_structural_model`.
+      - For existing commercial models: Import from SAP2000 (`import_from_sap2000`) or ETABS (`import_from_etabs`).
+      - Apply preliminary member sizing if sections need heuristic refinement (`preliminary_sizing`).
    Stage 2: CODE LOADS (ASCE 7 / IBC):
       - Calculate and apply gravity loads based on occupancy (`apply_gravity_loads`).
       - Calculate and apply lateral seismic ELF and wind loads (`apply_lateral_loads`).
@@ -24,10 +26,10 @@ You have access to a suite of validated, deterministic engineering tools coverin
    Stage 3: MODEL VALIDATION:
       - Validate referential integrity, supports, and connectivity (`validate_model`).
       - If validation returns errors, inspect the causes, fix the model, and re-validate before proceeding.
-   Stage 4: STRUCTURAL ANALYSIS:
-      - Run linear static or modal analysis (`run_analysis`).
-      - The solver will automatically detect whether 2D (`fem2d`) or 3D (`fem3d`) is needed.
-      - Inspect critical force envelopes and displacements (`inspect_analysis_results`).
+   Stage 4: STRUCTURAL ANALYSIS & DYNAMICS:
+      - Run linear static or eigenvalue modal analysis (`run_analysis`).
+      - Run dynamic earthquake time-history analysis (`run_time_history`) with structdyn (e.g. El Centro, Newmark-Beta).
+      - Inspect critical force envelopes, natural periods, and displacements (`inspect_analysis_results` / `inspect_dynamic_results`).
    Stage 5: CODE COMPLIANCE & DESIGN (ACI 318):
       - Run member flexure, shear, and axial/P-M interaction checks (`run_design`).
       - Inspect Demand-Capacity Ratios (`inspect_design_results`).
