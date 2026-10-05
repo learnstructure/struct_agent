@@ -18,6 +18,7 @@ from ..tools import (
     apply_lateral_loads,
     build_structural_model,
     create_frame_model,
+    create_model_from_plan_draft,
     create_project,
     export_to_etabs,
     export_to_sap2000,
@@ -27,16 +28,17 @@ from ..tools import (
     import_from_sap2000,
     inspect_analysis_results,
     inspect_design_results,
+    inspect_detailing_results,
     inspect_project,
     modify_project,
     preliminary_sizing,
     run_analysis,
-    inspect_analysis_results,
     run_time_history,
     inspect_dynamic_results,
     run_design,
 )
 from ..validation.model import validate_model
+from ..vision.encoding import build_multimodal_message
 from .events import (
     CompleteEvent,
     ErrorEvent,
@@ -119,6 +121,7 @@ class AgentRunner:
         # Register callable tools
         self._tool_map: Dict[str, Callable] = {
             "create_frame_model": create_frame_model,
+            "create_model_from_plan_draft": create_model_from_plan_draft,
             "build_structural_model": build_structural_model,
             "create_project": create_project,
             "inspect_project": inspect_project,
@@ -134,6 +137,7 @@ class AgentRunner:
             "inspect_dynamic_results": inspect_dynamic_results,
             "run_design": run_design,
             "inspect_design_results": inspect_design_results,
+            "inspect_detailing_results": inspect_detailing_results,
             "generate_drawings": generate_drawings,
             "import_from_sap2000": import_from_sap2000,
             "export_to_sap2000": export_to_sap2000,
@@ -162,6 +166,7 @@ class AgentRunner:
 
         # Tools that need project passed as first parameter or kwarg
         project_consumer_tools = {
+            "create_model_from_plan_draft",
             "build_structural_model",
             "inspect_project",
             "modify_project",
@@ -176,6 +181,7 @@ class AgentRunner:
             "inspect_dynamic_results",
             "run_design",
             "inspect_design_results",
+            "inspect_detailing_results",
             "generate_drawings",
             "export_to_sap2000",
             "export_to_etabs",
@@ -192,11 +198,16 @@ class AgentRunner:
 
         return fn(**call_args)
 
-    def run_stream(self, user_prompt: str) -> Generator[LLMEvent, None, str]:
+    def run_stream(
+        self,
+        user_prompt: str,
+        attachments: Optional[List[str]] = None,
+    ) -> Generator[LLMEvent, None, str]:
         """
         Stream multi-turn agent execution, yielding LLMEvents in real time.
         """
-        self.messages.append({"role": "user", "content": user_prompt})
+        user_msg = build_multimodal_message(user_prompt, attachments)
+        self.messages.append(user_msg)
         turn_count = 0
         final_answer = ""
         governing_dcr: Optional[float] = None

@@ -24,6 +24,8 @@ from struct_core import (
 )
 
 from ..state.project_state import ProjectState, WorkflowStage
+from ..vision.compiler import build_project_from_draft
+from ..vision.schemas import FloorPlanDraft, normalize_floor_plan_dict
 from .base import AgentError, ToolResult
 
 
@@ -181,22 +183,6 @@ def create_frame_model(
         else:
             y_coords = [float(j * story_height) for j in range(num_stories + 1)]
 
-        nodes: List[Node] = []
-        node_map: Dict[tuple, int] = {}
-        supports: List[Support] = []
-
-        # 1. Grid Nodes & Ground Supports
-        for j in range(num_stories + 1):
-            for i in range(num_bays + 1):
-                nid = j * (num_bays + 1) + i + 1
-                node_map[(i, j)] = nid
-                nodes.append(Node(id=nid, x=x_coords[i], y=y_coords[j], z=0.0))
-                if j == 0:
-                    if support_type.lower() == "pinned":
-                        supports.append(Support.pinned(node_id=nid))
-                    else:
-                        supports.append(Support.fixed(node_id=nid))
-
         # 2. Materials & Sections
         mat_id = "Concrete_4ksi"
         materials = [
@@ -213,6 +199,134 @@ def create_frame_model(
             RectangularSection(id=col_sec_id, b=col_b, h=col_h),
             RectangularSection(id=beam_sec_id, b=beam_b, h=beam_h),
         ]
+
+        if str(dimension or "2d").lower() == "3d":
+            # 3D Building Frame: X and Y are floor plan, Z is vertical elevation
+            bays_x = num_bays
+            bays_y = num_bays
+            z_coords = y_coords
+            y_coords_plan = x_coords
+
+            nodes: List[Node] = []
+            node_map_3d: Dict[tuple, int] = {}
+            supports: List[Support] = []
+            node_id_ctr = 1
+
+            for s_idx in range(num_stories + 1):
+                z = z_coords[s_idx]
+                for iy in range(bays_y + 1):
+                    y = y_coords_plan[iy]
+                    for ix in range(bays_x + 1):
+                        x = x_coords[ix]
+                        nid = node_id_ctr
+                        node_id_ctr += 1
+                        nodes.append(Node(id=nid, x=x, y=y, z=z))
+                        node_map_3d[(ix, iy, s_idx)] = nid
+                        if s_idx == 0:
+                            if support_type.lower() == "pinned":
+                                supports.append(Support(node_id=nid, ux=True, uy=True, uz=True, rx=False, ry=False, rz=False))
+                            else:
+                                supports.append(Support.fixed_3d(nid))
+
+            elements: List[BeamElement] = []
+            # Columns along Z
+            for s_idx in range(num_stories):
+                for iy in range(bays_y + 1):
+                    for ix in range(bays_x + 1):
+                        cid = f"C_{ix+1}_{iy+1}_{s_idx+1}"
+                        elements.append(
+                            BeamElement(
+                                id=cid,
+                                name=f"Col X{ix+1}Y{iy+1} Story{s_idx+1}",
+                                start_node=node_map_3d[(ix, iy, s_idx)],
+                                end_node=node_map_3d[(ix, iy, s_idx + 1)],
+                                material_id=mat_id,
+                                section_id=col_sec_id,
+                            )
+                        )
+
+            # Beams along X
+            for s_idx in range(1, num_stories + 1):
+                for iy in range(bays_y + 1):
+                    for ix in range(bays_x):
+                        bid = f"BX_{ix+1}_{iy+1}_{s_idx}"
+                        elements.append(
+                            BeamElement(
+                                id=bid,
+                                name=f"Beam X{ix+1} GridY{iy+1} Story{s_idx}",
+                                start_node=node_map_3d[(ix, iy, s_idx)],
+                                end_node=node_map_3d[(ix + 1, iy, s_idx)],
+                                material_id=mat_id,
+                                section_id=beam_sec_id,
+                            )
+                        )
+
+            # Beams along Y
+            for s_idx in range(1, num_stories + 1):
+                for iy in range(bays_y):
+                    for ix in range(bays_x + 1):
+                        bid = f"BY_{ix+1}_{iy+1}_{s_idx}"
+                        elements.append(
+                            BeamElement(
+                                id=bid,
+                                name=f"Beam Y{iy+1} GridX{ix+1} Story{s_idx}",
+                                start_node=node_map_3d[(ix, iy, s_idx)],
+                                end_node=node_map_3d[(ix, iy + 1, s_idx)],
+                                material_id=mat_id,
+                                section_id=beam_sec_id,
+                            )
+                        )
+
+            model = StructuralModel(
+                nodes=nodes,
+                elements=elements,
+                materials=materials,
+                sections=sections,
+                supports=supports,
+                story_elevations=z_coords,
+            )
+            project_title = title or f"3D {bays_x}x{bays_y} Frame ({num_stories} Stories)"
+            project = Project(model=model)
+            project.metadata.title = project_title
+            if author:
+                project.metadata.author = author
+
+            return ToolResult.success(
+                "create_frame_model",
+                data={
+                    "project": project,
+                    "title": project.metadata.title,
+                    "n_nodes": len(nodes),
+                    "n_elements": len(elements),
+                    "n_columns": (bays_x + 1) * (bays_y + 1) * num_stories,
+                    "n_beams": (bays_x * (bays_y + 1) + bays_y * (bays_x + 1)) * num_stories,
+                    "n_supports": len(supports),
+                    "bays_x": bays_x,
+                    "bays_y": bays_y,
+                    "stories": num_stories,
+                    "total_height": z_coords[-1],
+                    "total_width_x": x_coords[-1],
+                    "total_width_y": y_coords_plan[-1],
+                },
+                next_suggested_stage="MODEL_CREATED",
+            )
+
+        # 2D Frame Model
+        nodes: List[Node] = []
+        node_map: Dict[tuple, int] = {}
+        supports: List[Support] = []
+
+        # 1. Grid Nodes & Ground Supports
+        for j in range(num_stories + 1):
+            for i in range(num_bays + 1):
+                nid = j * (num_bays + 1) + i + 1
+                node_map[(i, j)] = nid
+                nodes.append(Node(id=nid, x=x_coords[i], y=y_coords[j], z=0.0))
+                if j == 0:
+                    if support_type.lower() == "pinned":
+                        supports.append(Support.pinned(node_id=nid))
+                    else:
+                        supports.append(Support.fixed(node_id=nid))
 
         # 3. Elements (Columns & Beams)
         elements: List[BeamElement] = []
@@ -389,6 +503,61 @@ def build_structural_model(
         },
         next_suggested_stage="MODEL_CREATED",
     )
+
+
+def create_model_from_plan_draft(
+    draft: Optional[Union[FloorPlanDraft, Dict[str, Any]]] = None,
+    project: Optional[Project] = None,
+    **kwargs: Any,
+) -> ToolResult:
+    """
+    Create or populate a 3D structural model from an architectural/structural
+    floor plan draft (grid lines, story elevations, column/beam definitions).
+    """
+    try:
+        if draft is None:
+            draft_obj = normalize_floor_plan_dict(kwargs)
+        elif isinstance(draft, dict):
+            draft_obj = normalize_floor_plan_dict(draft)
+        elif isinstance(draft, FloorPlanDraft):
+            draft_obj = draft
+        else:
+            return ToolResult.failure(
+                "create_model_from_plan_draft",
+                AgentError(
+                    error_type="invalid_input",
+                    message=f"Expected FloorPlanDraft or dict, got {type(draft).__name__}",
+                ),
+            )
+
+        compiled_project = build_project_from_draft(draft_obj, existing_project=project)
+
+        return ToolResult.success(
+            "create_model_from_plan_draft",
+            data={
+                "project": compiled_project,
+                "title": compiled_project.metadata.title,
+                "n_nodes": len(compiled_project.model.nodes),
+                "n_elements": len(compiled_project.model.elements),
+                "n_supports": len(compiled_project.model.supports),
+                "n_stories": len(draft_obj.stories),
+                "units": compiled_project.metadata.units.label,
+                "story_elevations": compiled_project.model.story_elevations,
+            },
+            next_suggested_stage="MODEL_CREATED",
+        )
+    except Exception as exc:
+        return ToolResult.failure(
+            "create_model_from_plan_draft",
+            AgentError(
+                error_type="compiler_error",
+                message=f"Failed to compile model from plan draft: {exc}",
+                possible_causes=[
+                    "Invalid grid line coordinates or missing stories",
+                    str(exc),
+                ],
+            ),
+        )
 
 
 def load_project(path: str) -> ToolResult:

@@ -11,6 +11,7 @@ from .base import ToolResult, AgentError
 from .model import (
     create_project,
     create_frame_model,
+    create_model_from_plan_draft,
     build_structural_model,
     inspect_project,
     modify_project,
@@ -24,8 +25,8 @@ from .loads import (
 )
 from .analysis import run_analysis, inspect_analysis_results
 from .dynamics import run_time_history, inspect_dynamic_results
-from .design import run_design, inspect_design_results
-from .drawing import generate_drawings
+from .design import run_design, inspect_design_results, inspect_detailing_results
+from .drawing import generate_drawings, generate_framing_drawings
 from .link import (
     import_from_sap2000,
     export_to_sap2000,
@@ -38,6 +39,7 @@ __all__ = [
     "AgentError",
     "create_project",
     "create_frame_model",
+    "create_model_from_plan_draft",
     "build_structural_model",
     "inspect_project",
     "modify_project",
@@ -52,7 +54,9 @@ __all__ = [
     "inspect_dynamic_results",
     "run_design",
     "inspect_design_results",
+    "inspect_detailing_results",
     "generate_drawings",
+    "generate_framing_drawings",
     "import_from_sap2000",
     "export_to_sap2000",
     "import_from_etabs",

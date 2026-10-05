@@ -36,6 +36,92 @@ ENGINEERING_TOOL_SCHEMAS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "create_model_from_plan_draft",
+            "description": "Create a complete, exact 3D structural model from an architectural or structural floor plan and grid draft. Use this tool when interpreting drawings (PDF, PNG, JPG) or reading structural plans with grid lines, dimensions, story heights, columns, and beams.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Project title (e.g. 'Office Building Structural Frame')"},
+                    "unit_system": {"type": "string", "enum": ["metric", "us_customary"], "description": "Unit system (metric=meters/kN, us_customary=feet/inches/kips)", "default": "metric"},
+                    "x_grids": {
+                        "type": "array",
+                        "description": "Grid lines along X axis (e.g. A, B, C or 1, 2, 3) with exact dimension coordinates",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "description": "Grid line callout (e.g. 'A', 'B', '1')"},
+                                "coordinate": {"type": "number", "description": "Exact coordinate value along X axis"},
+                            },
+                            "required": ["name", "coordinate"],
+                        },
+                    },
+                    "y_grids": {
+                        "type": "array",
+                        "description": "Grid lines along Y axis (e.g. 1, 2, 3 or A, B, C) with exact dimension coordinates",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "description": "Grid line callout (e.g. '1', '2', '3')"},
+                                "coordinate": {"type": "number", "description": "Exact coordinate value along Y axis"},
+                            },
+                            "required": ["name", "coordinate"],
+                        },
+                    },
+                    "stories": {
+                        "type": "array",
+                        "description": "Vertical stories from bottom to top. Story heights must be confirmed from elevations or user prompt.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "description": "Story name (e.g. 'Story 1', 'Roof')"},
+                                "height": {"type": "number", "description": "Story height (in meters or feet depending on unit_system)"},
+                            },
+                            "required": ["name", "height"],
+                        },
+                    },
+                    "columns": {
+                        "type": "array",
+                        "description": "Optional specific column locations at grid intersections. If omitted or empty, columns are placed at all grid intersections.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "grid_x": {"type": "string", "description": "X grid line name"},
+                                "grid_y": {"type": "string", "description": "Y grid line name"},
+                                "section_b": {"type": "number", "description": "Column width (optional)"},
+                                "section_h": {"type": "number", "description": "Column depth (optional)"},
+                            },
+                            "required": ["grid_x", "grid_y"],
+                        },
+                    },
+                    "beams": {
+                        "type": "array",
+                        "description": "Optional specific beam lines connecting grid points. If omitted or empty, beams are framed along all continuous grid lines on each floor.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "start_grid_x": {"type": "string"},
+                                "start_grid_y": {"type": "string"},
+                                "end_grid_x": {"type": "string"},
+                                "end_grid_y": {"type": "string"},
+                                "section_b": {"type": "number"},
+                                "section_h": {"type": "number"},
+                            },
+                            "required": ["start_grid_x", "start_grid_y", "end_grid_x", "end_grid_y"],
+                        },
+                    },
+                    "default_col_b": {"type": "number", "description": "Default column width (e.g. 0.4 m or 16 in)"},
+                    "default_col_h": {"type": "number", "description": "Default column depth (e.g. 0.4 m or 16 in)"},
+                    "default_beam_b": {"type": "number", "description": "Default beam width (e.g. 0.3 m or 12 in)"},
+                    "default_beam_h": {"type": "number", "description": "Default beam depth (e.g. 0.5 m or 20 in)"},
+                    "base_support": {"type": "string", "enum": ["fixed", "pinned"], "default": "fixed"},
+                },
+                "required": ["x_grids", "y_grids", "stories"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_project",
             "description": "Initialize a new structural engineering Project container, optionally populated with complete structural model geometry (nodes, elements, materials, sections, supports).",
             "parameters": {
@@ -350,15 +436,43 @@ ENGINEERING_TOOL_SCHEMAS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
-            "name": "generate_drawings",
-            "description": "Generate production-grade CAD structural drawings in DXF format (cross-sections, rebar mats, stirrups, beam/column elevations).",
+            "name": "inspect_detailing_results",
+            "description": "Inspect structural detailing results, bar bending schedules (BBS), and rebar tonnage breakdowns across members and footings.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "design_case_id": {"type": "string", "description": "Design case providing reinforcement detailing"},
-                    "output_path": {"type": "string", "description": "Target file path for the .dxf drawing"},
+                    "design_case_id": {"type": "string", "description": "Optional identifier of the design check / detailing case to inspect"},
                 },
-                "required": ["design_case_id", "output_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_drawings",
+            "description": "Generate production-grade CAD structural drawings in DXF format. In 'auto' mode (default), generates a complete composite structural drawing set containing the General Arrangement floor framing plan, frame elevations in each orthogonal direction (for 3D buildings), and reinforced concrete rebar detailing (if design was performed). Standard drafting scales (1:100 plan, 1:50 elevation, 1:20 detailing) and engineering unit systems are applied automatically.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "output_path": {"type": "string", "description": "Target file path for the .dxf drawing (e.g. 'structural_drawings.dxf')"},
+                    "drawing_type": {
+                        "type": "string",
+                        "enum": ["auto", "detailing", "framing"],
+                        "description": "Drawing type: 'auto' (default: complete composite sheet with framing plan, elevations in each direction, and detailing if designed), 'framing' (GA framing plans & elevations only), or 'detailing' (RC rebar detailing only)",
+                        "default": "auto",
+                    },
+                    "design_case_id": {"type": "string", "description": "Design case identifier when generating detailing drawings (e.g. 'ACI318_19')"},
+                    "view_mode": {
+                        "type": "string",
+                        "enum": ["both", "plan", "elevation"],
+                        "description": "View mode for GA framing drawings: 'both' (combined framing plan & elevation sheet), 'plan' (floor framing plan), 'elevation' (frame elevation along a grid line)",
+                        "default": "both",
+                    },
+                    "story_level": {"type": "string", "description": "Optional story name or level index for framing plan (e.g. 'FL1', 'ROOF')"},
+                    "grid_line": {"type": "string", "description": "Optional grid line name for frame elevation (e.g. '1', 'A')"},
+                    "title": {"type": "string", "description": "Optional custom drawing title"},
+                },
+                "required": ["output_path"],
             },
         },
     },

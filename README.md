@@ -76,14 +76,18 @@ struct_agent/
 |   +-- agent.py              # StructAgent orchestrator (deterministic, no LLM)
 |   +-- tools/
 |   |   +-- base.py           # ToolResult, AgentError
-|   |   +-- model.py          # create_project, create_frame_model, build_structural_model, inspect_project, modify_project, save_project, load_project
+|   |   +-- model.py          # create_project, create_frame_model, build_structural_model, create_model_from_plan_draft, inspect_project, modify_project, save_project, load_project
 |   |   +-- loads.py          # apply_gravity_loads, apply_lateral_loads, generate_load_combinations
 |   |   +-- link.py           # import_from_sap2000, export_to_sap2000, import_from_etabs, export_to_etabs
 |   |   +-- sizing.py         # preliminary_sizing
 |   |   +-- analysis.py       # run_analysis, inspect_analysis_results
 |   |   +-- dynamics.py       # run_time_history, inspect_dynamic_results
-|   |   +-- design.py         # run_design, inspect_design_results
-|   |   +-- drawing.py        # generate_drawings
+|   |   +-- design.py         # run_design, inspect_design_results, inspect_detailing_results
+|   |   +-- drawing.py        # generate_drawings (unified: GA framing & RC detailing)
+|   +-- vision/               # Multimodal Drawing Ingestion & Deterministic Grid Compiler
+|   |   +-- schemas.py        # Pydantic schemas (FloorPlanDraft, GridLineDraft, StoryDraft, ColumnDraft, BeamDraft)
+|   |   +-- compiler.py       # Pure-Python deterministic grid compiler (draft -> struct_core.Project)
+|   |   +-- encoding.py       # Drawing rasterization & multimodal message builder (pypdfium2 PDF, PNG, JPG)
 |   +-- validation/
 |   |   +-- model.py          # validate_model
 |   |   +-- analysis.py       # validate_analysis
@@ -92,12 +96,12 @@ struct_agent/
 |   |   +-- project_state.py  # WorkflowStage enum + ProjectState dataclass
 |   +-- llm/                  # Autonomous LLM Orchestration & Streaming Engine
 |   |   +-- events.py         # Streaming events (Thought, ToolCall, ToolResult, StateUpdate, etc.)
-|   |   +-- schemas.py        # OpenAI/Ollama function calling schema definitions for 17+ tools
+|   |   +-- schemas.py        # OpenAI/Ollama function calling schema definitions for 18+ tools
 |   |   +-- prompts.py        # Structural engineering system prompts and safety grounding rules
-|   |   +-- runner.py         # Multi-turn autonomous agent runner (run, run_stream)
+|   |   +-- runner.py         # Multi-turn autonomous agent runner with multimodal attachments (run, run_stream)
 |   |   +-- providers/        # LLM Provider adapters
 |   |       +-- base.py       # BaseLLMProvider interface
-|   |       +-- http_client.py# Zero-dependency NativeHTTPProvider (urllib, OpenAI/Ollama)
+|   |       +-- http_client.py# Zero-dependency NativeHTTPProvider (urllib, OpenAI/Ollama/Gemini)
 |   |       +-- litellm_client.py # LiteLLM multi-provider adapter (Claude, Gemini, etc.)
 +-- tests/
 |   +-- test_pipeline_smoke.py    # End-to-end pipeline smoke test
@@ -107,15 +111,17 @@ struct_agent/
 |   +-- test_dynamics.py          # Dynamic time-history, modal response & peak force envelope tests
 |   +-- test_link_tools.py        # SAP2000 & ETABS import/export tool tests
 |   +-- test_loads_integration.py # Preliminary sizing & load generation tests
+|   +-- test_vision_compiler.py   # Deterministic grid snapping, column generation & load combination tests
+|   +-- test_vision_agent.py      # Multimodal attachment encoding, pypdfium2 PDF rendering & VLM loop tests
 |   +-- test_llm_runner.py        # Autonomous agent loop, streaming events & mock tests
 +-- examples/
-    +-- demo_pipeline.py                   # Full pipeline via StructAgent (start here)
-    +-- dynamic_design_pipeline.py         # End-to-end seismic time-history & ACI 318 design pipeline
-    +-- end_to_end_ecosystem_pipeline.py   # Low-level adapter integration test
-    +-- general_frame.py                   # struct_draw standalone: framing plan + truss DXFs
-    +-- llm_quickstart.py                  # Autonomous LLM runner quickstart (OpenAI/simulated)
-    +-- llm_streaming_gui_simulation.py    # GUI/dashboard event streaming consumer simulation
-    +-- llm_local_ollama.py                # 100% offline local model execution (Ollama / Llama 3.1)
+|   +-- demo_pipeline.py                   # Full pipeline via StructAgent (start here)
+|   +-- dynamic_design_pipeline.py         # End-to-end seismic time-history & ACI 318 design pipeline
+|   +-- end_to_end_ecosystem_pipeline.py   # Low-level adapter integration test
+|   +-- general_frame.py                   # struct_draw standalone: framing plan + truss DXFs
+|   +-- llm_quickstart.py                  # Autonomous LLM runner quickstart (OpenAI/simulated)
+|   +-- llm_streaming_gui_simulation.py    # GUI/dashboard event streaming consumer simulation
+|   +-- llm_local_ollama.py                # 100% offline local model execution (Ollama / Llama 3.1)
 ```
 
 ---
@@ -181,6 +187,7 @@ from struct_agent import (
     create_project,           # Wrap a StructuralModel in a Project
     create_frame_model,       # Quick parametric frame generator
     build_structural_model,   # Dictionary/schema-based model builder
+    create_model_from_plan_draft, # Build 3D Project from VLM FloorPlanDraft
     inspect_project,          # Summary of project contents
     modify_project,           # Apply a mutator to the model
     preliminary_sizing,       # Heuristic RC member sizing from spans
@@ -198,11 +205,22 @@ from struct_agent import (
     inspect_dynamic_results,  # Peak dynamic response summary (displacements, base shear, envelope)
     run_design,               # ACI 318-19 RC design via aci318
     inspect_design_results,   # Structured DCR / pass-fail summary
+    inspect_detailing_results,# Structured rebar schedule & BBS summary
     generate_drawings,        # DXF export via struct_draw
     AgentRunner,              # Autonomous multi-turn LLM reasoning loop
     get_provider,             # Provider factory ('native', 'litellm', 'auto')
     LLMEvent,                 # Streaming event base class
     ThoughtEvent, ToolCallEvent, ToolResultEvent, StateUpdateEvent, # Granular events
+)
+
+# Multimodal Drawing Ingestion & Deterministic Compiler Subsystem
+from struct_agent.vision import (
+    FloorPlanDraft,           # Pydantic schema for floor plans extracted by VLMs
+    GridLineDraft,            # Grid axes with coordinate/dimension spacing
+    StoryDraft,               # Story definition (height, level, floor loads)
+    ColumnDraft, BeamDraft,   # Individual column/beam overrides & section assignments
+    build_project_from_draft, # Pure-Python deterministic 3D grid compiler
+    encode_attachments,       # Multi-format drawing encoder (pypdfium2 PDF, PNG, JPG)
 )
 ```
 
@@ -213,6 +231,7 @@ from struct_agent import (
 create_project(structural_model, *, title=None, author=None) -> ToolResult
 create_frame_model(*, bays=1, stories=1, bay_width=6.0, story_height=3.0, ...) -> StructuralModel
 build_structural_model(model_dict) -> ToolResult
+create_model_from_plan_draft(plan_draft, *, project=None, title=None) -> ToolResult
 inspect_project(project) -> ToolResult
 modify_project(project, mutator) -> ToolResult
 save_project(project, path) -> ToolResult
@@ -241,9 +260,10 @@ inspect_analysis_results(project, analysis_case_id) -> ToolResult
 run_time_history(project, *, analysis_case_id, earthquake="elcentro", direction="x", dt=None, scale_factor=1.0, damping_ratio=0.05, n_modes_damping=2, method="modal_superposition", solver="auto", envelope_to_design=True) -> ToolResult
 inspect_dynamic_results(project, analysis_case_id) -> ToolResult
 
-# Design tools (aci318)
+# Design & Detailing tools (aci318)
 run_design(project, *, design_case_id, design_code="ACI 318-19", analysis_case_id=None) -> ToolResult
 inspect_design_results(project, design_case_id) -> ToolResult
+inspect_detailing_results(project, design_case_id=None) -> ToolResult
 
 # Drawing tools (struct_draw)
 generate_drawings(project, *, design_case_id, output_path, detailing_case_id=None) -> ToolResult
@@ -353,6 +373,123 @@ res_design = run_design(
     analysis_case_id="Earthquake_ElCentro",
 )
 print("Design status:", res_design.data["summary"]["status"])
+
+# 5. Production CAD drawings via unified generate_drawings tool
+# General Arrangement (GA) framing plans & elevations:
+res_framing = generate_drawings(
+    project,
+    output_path="framing_sheet.dxf",
+    drawing_type="framing",
+    view_mode="both",  # "plan", "elevation", or "both"
+)
+print("GA Framing drawing generated:", res_framing.data["output_path"])
+
+# Reinforced concrete rebar detailing (cross-sections, rebar mats, stirrups):
+res_detailing = generate_drawings(
+    project,
+    output_path="rebar_detailing.dxf",
+    drawing_type="detailing",
+    design_case_id="ACI318_Dynamic_Design",
+)
+print("RC Detailing drawing generated:", res_detailing.data["output_path"])
+```
+
+
+### Multimodal Drawing-to-3D-Model Engine (VLM + Grid Compiler)
+
+`struct_agent` features a robust, two-step hybrid pipeline for converting architectural floor plans and structural drawings (PNG, JPG, multi-page vector PDF) directly into analytical 3D structural models:
+
+```
+ User Drawing (PDF/PNG/JPG)
+         |
+         v
+ [ VLM Semantic Transcription ]  <- Google Gemini 2.0, Ollama (gemma4:31b), OpenAI (gpt-4o)
+         |
+         | Transcribes written dimension strings ("24'-0"", "6.5 m") & grid labels (A-B-C / 1-2-3)
+         v
+  FloorPlanDraft (Pydantic)
+         |
+         v
+ [ Deterministic Grid Compiler ]  <- Pure-Python compiler (struct_agent.vision.compiler)
+         |
+         | - Computes exact 3D nodal intersections
+         | - Spans continuous columns across all stories
+         | - Frames perimeter and interior floor beams
+         | - Sets 6-DOF ground supports (Fixed/Pinned)
+         | - Generates ASCE 7 load cases (1.4D, 1.2D + 1.6L)
+         v
+ struct_core.Project (Ready for 3D FEA, modal analysis & ACI 318 design)
+```
+
+#### Why a 2-Step Hybrid Pipeline?
+1. **Transcribe Dimensions, Don't Estimate Pixels**: VLMs excel at reading handwritten and CAD dimension annotations, identifying structural column grids, and noting story heights. However, relying on raw pixel coordinates or asking an LLM to guess 3D nodal arrays leads to non-coplanar framing, misaligned joints, and singular stiffness matrices.
+2. **Pure-Python Deterministic Compiler**: By capturing dimensions in a strict semantic intermediate representation (`FloorPlanDraft`), the deterministic compiler handles exact coordinate math, column continuity, perimeter and interior beam topology, boundary conditions, and code load cases with mathematical precision.
+3. **Multi-Turn Story Clarification**: When a user uploads a floor plan drawing without elevations, the agent detects the missing vertical geometry and prompts the user for clarification (*"How many stories is this building and what is the typical story height?"*). Because multi-turn conversation history is preserved across prompts, the agent remembers the previously extracted floor plan once the user responds and compiles the complete 3D model.
+4. **Multi-Format Drawing Ingestion**: Multimodal attachments (PNG, JPG, WEBP) and multi-page vector drawings (PDF) are ingested seamlessly. Vector PDFs are rendered into high-fidelity image buffers at 144 DPI using `pypdfium2` before transmission to local or cloud VLMs.
+
+#### Programmatic Usage
+
+```python
+from struct_agent import create_model_from_plan_draft
+from struct_agent.vision import (
+    FloorPlanDraft,
+    GridLineDraft,
+    StoryDraft,
+    build_project_from_draft,
+)
+
+# 1. Structured floor plan draft (produced by VLM or defined programmatically)
+draft = FloorPlanDraft(
+    title="2-Story Commercial Office",
+    unit_system="si",
+    grid_lines_x=[
+        GridLineDraft(id="A", coordinate=0.0),
+        GridLineDraft(id="B", coordinate=6.0),
+        GridLineDraft(id="C", coordinate=12.0),
+    ],
+    grid_lines_y=[
+        GridLineDraft(id="1", coordinate=0.0),
+        GridLineDraft(id="2", coordinate=5.0),
+        GridLineDraft(id="3", coordinate=10.0),
+    ],
+    stories=[
+        StoryDraft(id="Story1", level=1, height=3.5),
+        StoryDraft(id="Story2", level=2, height=3.0),
+    ],
+    support_type="fixed",
+    default_fc_kpa=27580.0,  # 4 ksi concrete
+)
+
+# 2. Build 3D Project via ToolResult wrapper (or directly via build_project_from_draft)
+result = create_model_from_plan_draft(draft)
+project = result.data["project"]
+print(f"Generated 3D Model: {len(project.model.nodes)} nodes, {len(project.model.elements)} elements.")
+```
+
+#### Multimodal Autonomous Execution via `AgentRunner`
+
+```python
+from struct_agent import AgentRunner
+
+# Works with local Ollama (gemma4:31b, qwen2-vl) or cloud (Gemini, OpenAI)
+runner = AgentRunner(
+    provider="native",
+    model="gemini/gemini-2.0-flash",  # or "ollama/gemma4:31b"
+)
+
+# Stream thought process and tool execution with drawing attachments
+events = runner.run_stream(
+    "Please read this architectural drawing, verify the dimensions, and create a 3D structural model.",
+    attachments=["path/to/floor_plan.pdf"],
+)
+
+for event in events:
+    if event.type == "thought":
+        print(f"[REASONING] {event.thought}")
+    elif event.type == "tool_call":
+        print(f"[TOOL] Calling {event.tool_name} with {event.arguments}")
+    elif event.type == "tool_result":
+        print(f"[RESULT] {event.tool_name} -> success: {event.ok}")
 ```
 
 ---
@@ -371,9 +508,12 @@ pytest struct_agent/tests/ -v
 | `test_dynamics.py` | Dynamic time-history analysis, ground motion integration, modal analysis, peak force enveloping to ACI 318 |
 | `test_link_tools.py` | SAP2000 & ETABS file import, export, and error handling |
 | `test_loads_integration.py` | Preliminary member sizing and ASCE 7 load generator tool integration |
+| `test_vision_compiler.py` | Deterministic grid snapping, column generation, perimeter/interior beam framing, and ASCE 7 load combinations |
+| `test_vision_agent.py` | Multimodal attachment encoding, pypdfium2 PDF rendering, and VLM multi-turn drafting |
 | `test_tool_contracts.py` | Individual tool input validation (missing project, wrong types, etc.) |
 | `test_workflow_state.py` | State machine: valid transitions, invalid transitions, idempotency |
 | `test_llm_runner.py` | Autonomous multi-turn agent loop, event streaming, provider factory, and mock tool reasoning |
+| `test_framing_drawing_tool.py` | GA framing plan & elevation generation directly from StructuralModel |
 
 ---
 
@@ -413,27 +553,31 @@ create the full `structeng` environment.
 | Dynamic time-history tool (`run_time_history`) with El Centro/Kobe/custom ground motions | struct_agent |
 | Dynamic peak force envelope synthesis for downstream ACI 318 RC design | struct_agent |
 | Dynamic results inspection tool (`inspect_dynamic_results`) | struct_agent |
+| Multimodal drawing ingestion (PDF rasterization via `pypdfium2`, PNG, JPG, WEBP) | struct_agent |
+| Deterministic grid compiler (`FloorPlanDraft` -> 3D `struct_core.Project`) | struct_agent |
+| VLM plan drafting tool (`create_model_from_plan_draft`) | struct_agent |
+| Multi-turn conversational memory & drawing context preservation across prompts | struct_agent |
 | Workflow state machine (7 stages, transition enforcement) | struct_agent |
-| Agent tool layer (17+ tools, structured `ToolResult`) | struct_agent |
+| Agent tool layer (18+ tools, structured `ToolResult`) | struct_agent |
 | Automated solver selection (`auto`, `fem2d`, `fem3d`) | struct_agent |
 | Deterministic demo orchestrator (`StructAgent`) | struct_agent |
 | Autonomous cognitive LLM orchestration wrapper (`AgentRunner`) | struct_agent |
 | Zero-dependency native HTTP client for OpenAI/Ollama API | struct_agent |
 | Multi-provider LiteLLM adapter (Claude, Gemini, OpenAI, etc.) | struct_agent |
 | Granular event streaming interface (`ThoughtEvent`, `ToolCallEvent`, `StateUpdateEvent`, etc.) | struct_agent |
-| Grounded system prompt & 17+ tool schema function signatures | struct_agent |
-| End-to-end pipeline, dynamics & LLM mock tests | struct_agent |
+| Grounded system prompt & 18+ tool schema function signatures | struct_agent |
+| End-to-end pipeline, dynamics, vision compiler & LLM mock tests | struct_agent |
 
 ---
 
 ## Future Evolution & Gaps
 
-The cognitive LLM wrapper is fully functional via `AgentRunner`! The remaining ecosystem roadmap items are:
+The cognitive LLM wrapper and multimodal drawing engine are fully functional via `AgentRunner`! The remaining ecosystem roadmap items are:
 
-| Feature / Integration | Description & Impact |
-|---|---|
-| **Future GUI Application** | Building a desktop (e.g. PyQt/Electron) or web (FastAPI/React) interface consuming `AgentRunner.run_stream()` events, with interactive 3D rendering and live DXF preview |
-| **Nonlinear dynamic analysis** | Material and geometric nonlinearity, plastic hinges, and inelastic time-history analysis |
+| Feature / Integration | Description & Impact | Status |
+|---|---|---|
+| **StructStudio Desktop GUI** | Full-featured PySide6/PyVista desktop studio (`struct_gui`) consuming `AgentRunner.run_stream()` events with 3D CAD modeling, dynamic modal animations, drawing uploads, and real-time viewport synchronization | ✅ Available (`struct_gui`) |
+| **Nonlinear dynamic analysis** | Material and geometric nonlinearity, plastic hinges, and inelastic time-history analysis | In Design |
 
 ---
 

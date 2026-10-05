@@ -44,10 +44,18 @@ def test_demo_pipeline_runs_to_completion(tmp_path: Path):
         "inspect_analysis_results",
         "run_design",
         "inspect_design_results",
+        "inspect_detailing_results",
         "generate_drawings",
         "save_project",
     }
     assert expected_tools.issubset(tool_names)
+
+    # Detailing and rebar schedule must be dynamically computed
+    det_res = state.project.detailing_results.get("ACI318_19")
+    assert det_res is not None
+    assert det_res.aggregate_schedule is not None
+    assert len(det_res.aggregate_schedule.items) > 0
+    assert det_res.aggregate_schedule.total_weight > 0.0
 
 
 def test_drawing_generation_requires_design():

@@ -46,6 +46,7 @@ from .tools.dynamics import (
 from .tools.design import (
     run_design,
     inspect_design_results,
+    inspect_detailing_results,
 )
 from .tools.loads import (
     apply_gravity_loads,
@@ -53,7 +54,7 @@ from .tools.loads import (
     generate_load_combinations,
 )
 from .tools.sizing import preliminary_sizing
-from .tools.drawing import generate_drawings
+from .tools.drawing import generate_drawings, generate_framing_drawings
 from .tools.link import (
     import_from_sap2000,
     export_to_sap2000,
@@ -115,7 +116,9 @@ __all__ = [
     "inspect_dynamic_results",
     "run_design",
     "inspect_design_results",
+    "inspect_detailing_results",
     "generate_drawings",
+    "generate_framing_drawings",
     "import_from_sap2000",
     "export_to_sap2000",
     "import_from_etabs",

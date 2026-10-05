@@ -48,7 +48,7 @@ from .tools.model import (
 )
 from .tools.loads import apply_gravity_loads, generate_load_combinations
 from .tools.analysis import run_analysis, inspect_analysis_results
-from .tools.design import run_design, inspect_design_results
+from .tools.design import run_design, inspect_design_results, inspect_detailing_results
 from .tools.drawing import generate_drawings
 from .validation.model import validate_model
 
@@ -158,6 +158,10 @@ class StructAgent:
         inspected_design = inspect_design_results(state.project, design_case_id)
         self._require(inspected_design, "inspect_design_results")
         state.log_tool("inspect_design_results", inspected_design.status, inspected_design.data)
+
+        inspected_detailing = inspect_detailing_results(state.project, design_case_id)
+        self._require(inspected_detailing, "inspect_detailing_results")
+        state.log_tool("inspect_detailing_results", inspected_detailing.status, inspected_detailing.data)
 
         if output_dxf:
             drawn = generate_drawings(

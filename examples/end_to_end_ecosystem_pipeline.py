@@ -138,6 +138,18 @@ def run_pipeline():
     for elem_id, elem_des in design_res.element_results.items():
         print(f"      - Element {elem_id} ({elem_des.member_type}): DCR = {elem_des.governing_dcr:.3f}")
 
+    print(f"\n      PROJECT BAR BENDING SCHEDULE (BBS) [Derived dynamically from ACI 318 design]:")
+    print(f"      {'Mark':<8} {'Bar':<6} {'Qty':<6} {'Cut L (in)':<12} {'Tot L (ft)':<12} {'Weight (lbs)':<14} {'Shape':<12} {'Location'}")
+    print(f"      {'-'*8} {'-'*6} {'-'*6} {'-'*12} {'-'*12} {'-'*14} {'-'*12} {'-'*24}")
+    if aggregate and aggregate.items:
+        for it in aggregate.items:
+            tot_l_ft = it.total_length / 12.0
+            print(f"      {it.mark:<8} #{it.bar_size:<5} {it.quantity:<6} {it.cut_length:<12.1f} {tot_l_ft:<12.1f} {it.weight:<14.1f} {it.shape_code:<12} {it.location or ''}")
+        print(f"      {'-'*8} {'-'*6} {'-'*6} {'-'*12} {'-'*12} {'-'*14} {'-'*12} {'-'*24}")
+        print(f"      TOTAL REBAR WEIGHT: {aggregate.total_weight:.1f} lbs ({aggregate.total_weight / 2000.0:.3f} US tons)")
+    else:
+        print("      No schedule items generated.")
+
     # -------------------------------------------------------------------------
     # STEP 4: Render DXF Drawings via struct_draw
     # -------------------------------------------------------------------------
@@ -166,6 +178,10 @@ def run_pipeline():
     print(f"      Reloaded Project Title: {reloaded_project.metadata.title}")
     assert reloaded_project.design_results is not None
     assert reloaded_project.detailing_results is not None
+    reloaded_det = reloaded_project.detailing_results["ACI318_19"]
+    assert reloaded_det.aggregate_schedule is not None
+    assert len(reloaded_det.aggregate_schedule.items) > 0
+    assert reloaded_det.aggregate_schedule.total_weight > 0.0
 
     print("\n" + "=" * 70)
     print("    PIPELINE EXECUTION COMPLETED SUCCESSFULLY WITH ALL CHECKS PASSED! ")
