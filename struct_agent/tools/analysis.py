@@ -41,6 +41,8 @@ def run_analysis(
     solver: str = "auto",
     load_case_id: Optional[str] = None,
     num_modes: int = 6,
+    include_self_weight: bool = True,
+    include_shear_deformation: Optional[bool] = None,
 ) -> ToolResult:
     """
     Run finite element analysis through the struct_core adapters (fem2d or fem3d).
@@ -61,6 +63,11 @@ def run_analysis(
         Defaults to ``"envelope"`` if combinations exist, else the first load case.
     num_modes
         Number of modes to compute when ``analysis_type="modal"`` (default: 6).
+    include_self_weight
+        Whether to automatically compute and include element self-weight for any
+        load case where ``include_self_weight=True`` (default: True).
+    include_shear_deformation
+        Whether to consider Timoshenko shear deformation in frame/beam elements.
     """
     if project is None or getattr(project, "model", None) is None:
         return ToolResult.failure(
@@ -96,13 +103,23 @@ def run_analysis(
         def _solve_single_case(proj: Any, solver_name: str, target_lc_id: Optional[str]) -> Any:
             if solver_name == "fem2d":
                 from fem2d.adapters import model_from_core, result_to_core
-                struct = model_from_core(proj, load_case_id=target_lc_id)
+                struct = model_from_core(
+                    proj,
+                    load_case_id=target_lc_id,
+                    include_self_weight=include_self_weight,
+                    include_shear_deformation=include_shear_deformation,
+                )
                 struct.solve()
                 return result_to_core(struct, analysis_case_id=target_lc_id or "LCASE1")
             else:
                 from fem3d.adapters import model_from_core as fem3d_model_from_core
                 from fem3d.adapters import result_to_core as fem3d_result_to_core
-                struct = fem3d_model_from_core(proj, load_case_id=target_lc_id)
+                struct = fem3d_model_from_core(
+                    proj,
+                    load_case_id=target_lc_id,
+                    include_self_weight=include_self_weight,
+                    include_shear_deformation=include_shear_deformation,
+                )
                 struct.solve()
                 res = fem3d_result_to_core(struct)
                 res.analysis_case_id = target_lc_id or "LCASE1"
@@ -207,10 +224,10 @@ def run_analysis(
         try:
             if resolved_solver == "fem2d":
                 from fem2d.adapters import model_from_core as fem2d_model_from_core
-                structure = fem2d_model_from_core(project)
+                structure = fem2d_model_from_core(project, include_shear_deformation=include_shear_deformation)
             else:
                 from fem3d.adapters import model_from_core as fem3d_model_from_core
-                structure = fem3d_model_from_core(project)
+                structure = fem3d_model_from_core(project, include_shear_deformation=include_shear_deformation)
 
             structure.number_dofs()
             structure.apply_boundary_conditions()

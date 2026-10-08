@@ -80,3 +80,14 @@ def test_link_tool_error_handling():
     exp = export_to_sap2000(None, output_path="out.s2k")
     assert not exp.ok
     assert exp.error.error_type == "missing_input"
+
+
+def test_import_sap2000_with_self_weight(fixtures_dir):
+    s2k_path = fixtures_dir / "sample_frame.s2k"
+    res = import_from_sap2000(s2k_path, materialize_self_weight=True)
+    assert res.ok
+    project = res.data["project"]
+    # Element loads should have been augmented with self-weight
+    dead_case = next(lc for lc in project.model.load_cases if lc.id == "DEAD")
+    assert len(dead_case.element_loads) >= 1
+    assert dead_case.include_self_weight is False

@@ -220,3 +220,81 @@ def generate_load_combinations(
         },
         next_suggested_stage="MODEL_VALIDATED",
     )
+
+
+def apply_self_weight(
+    project: Any,
+    *,
+    target_case_id: Optional[str] = None,
+    unit_system: Optional[str] = None,
+    direction: Optional[str] = None,
+) -> ToolResult:
+    """
+    Materialize member self-weight distributed loads for any load case where include_self_weight=True.
+
+    Note: When analyzing with run_analysis, solvers (fem2d and fem3d) automatically compute
+    and include element self-weight on the fly for cases with include_self_weight=True.
+    Calling apply_self_weight explicitly writes DistributedLoad items directly into the
+    Project schema (and sets include_self_weight=False to prevent double-counting).
+
+    Parameters
+    ----------
+    project : Project
+        The project container holding the structural model.
+    target_case_id : str, optional
+        Target load case ID if no case currently has include_self_weight=True.
+    unit_system : str, optional
+        'si' or 'us'. If omitted, automatically inferred from project.metadata.units.
+    direction : str, optional
+        Gravity direction: '-z' for 3D frames or '-y' for 2D plane frames. Inferred if omitted.
+
+    Returns
+    -------
+    ToolResult
+        Success ToolResult with summary of materialized loads.
+    """
+    if project is None or getattr(project, "model", None) is None:
+        return ToolResult.failure(
+            "apply_self_weight",
+            AgentError(
+                error_type="missing_input",
+                message="No valid Project provided to apply_self_weight.",
+            ),
+        )
+
+    try:
+        from struct_load import apply_self_weight as run_apply_self_weight
+    except ImportError as exc:
+        return ToolResult.failure(
+            "apply_self_weight",
+            AgentError(
+                error_type="dependency_error",
+                message=f"struct_load is unavailable: {exc}",
+            ),
+        )
+
+    try:
+        run_apply_self_weight(
+            project,
+            target_case_id=target_case_id,
+            unit_system=unit_system,
+            direction=direction,
+        )
+    except Exception as exc:
+        return ToolResult.failure(
+            "apply_self_weight",
+            AgentError(
+                error_type="load_generation_failure",
+                message=f"Failed to apply self-weight: {exc}",
+            ),
+        )
+
+    n_loads = sum(len(lc.element_loads) for lc in project.model.load_cases)
+    return ToolResult.success(
+        "apply_self_weight",
+        data={
+            "n_load_cases": len(project.model.load_cases),
+            "total_element_loads": n_loads,
+        },
+        next_suggested_stage="LOADS_APPLIED",
+    )

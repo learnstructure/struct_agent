@@ -16,6 +16,7 @@ from ..state.project_state import ProjectState, WorkflowStage
 from ..tools import (
     apply_gravity_loads,
     apply_lateral_loads,
+    apply_self_weight,
     build_structural_model,
     create_frame_model,
     create_model_from_plan_draft,
@@ -129,6 +130,7 @@ class AgentRunner:
             "preliminary_sizing": preliminary_sizing,
             "apply_gravity_loads": apply_gravity_loads,
             "apply_lateral_loads": apply_lateral_loads,
+            "apply_self_weight": apply_self_weight,
             "generate_load_combinations": generate_load_combinations,
             "validate_model": validate_model,
             "run_analysis": run_analysis,

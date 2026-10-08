@@ -31,9 +31,13 @@ from .tools.base import ToolResult, AgentError
 from .tools.model import (
     create_project,
     create_frame_model,
+    create_model_from_plan_draft,
     build_structural_model,
     inspect_project,
     modify_project,
+    set_project_units,
+    save_project,
+    load_project,
 )
 from .tools.analysis import (
     run_analysis,
@@ -51,6 +55,7 @@ from .tools.design import (
 from .tools.loads import (
     apply_gravity_loads,
     apply_lateral_loads,
+    apply_self_weight,
     generate_load_combinations,
 )
 from .tools.sizing import preliminary_sizing
@@ -102,12 +107,17 @@ __all__ = [
     "AgentError",
     "create_project",
     "create_frame_model",
+    "create_model_from_plan_draft",
     "build_structural_model",
     "inspect_project",
     "modify_project",
+    "set_project_units",
+    "save_project",
+    "load_project",
     "preliminary_sizing",
     "apply_gravity_loads",
     "apply_lateral_loads",
+    "apply_self_weight",
     "generate_load_combinations",
     "validate_model",
     "run_analysis",

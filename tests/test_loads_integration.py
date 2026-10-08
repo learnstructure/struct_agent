@@ -16,6 +16,7 @@ from struct_agent import (
     preliminary_sizing,
     apply_gravity_loads,
     apply_lateral_loads,
+    apply_self_weight,
     generate_load_combinations,
     validate_model,
     run_analysis,
@@ -95,3 +96,15 @@ def test_preliminary_sizing_and_loading_flow():
     des_res = run_design(project, design_case_id="ACI318_19", analysis_case_id="Env")
     assert des_res.ok is True
     assert "ACI318_19" in project.design_results
+
+
+def test_apply_self_weight_tool():
+    from struct_core import LoadCase
+    project = _build_bare_frame()
+    preliminary_sizing(project)
+    project.model.load_cases = [LoadCase(id="DEAD", include_self_weight=True)]
+
+    res = apply_self_weight(project)
+    assert res.ok is True
+    assert res.data["total_element_loads"] == 3
+    assert project.model.load_cases[0].include_self_weight is False

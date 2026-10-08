@@ -281,6 +281,21 @@ ENGINEERING_TOOL_SCHEMAS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "apply_self_weight",
+            "description": "Materialize element self-weight distributed gravity loads for any load case where include_self_weight=True (e.g. from SAP2000 SelfWtMult=1 or custom dead load cases).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_case_id": {"type": "string", "description": "Optional specific load case ID to receive self-weight if no case currently has include_self_weight=True (default: 'DEAD')"},
+                    "unit_system": {"type": "string", "enum": ["si", "us"], "description": "Optional unit system override ('si' or 'us')"},
+                    "direction": {"type": "string", "enum": ["-z", "-y"], "description": "Optional gravity direction ('-z' for 3D frames, '-y' for 2D plane frames)"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "apply_lateral_loads",
             "description": "Calculate and apply seismic Equivalent Lateral Force (ELF) and/or wind lateral story forces per ASCE 7.",
             "parameters": {
@@ -347,6 +362,11 @@ ENGINEERING_TOOL_SCHEMAS: List[Dict[str, Any]] = [
                     },
                     "load_case_id": {"type": "string", "description": "Specific load case or 'envelope' over all combinations"},
                     "num_modes": {"type": "integer", "description": "Number of modes for modal analysis (default: 6)", "default": 6},
+                    "include_self_weight": {
+                        "type": "boolean",
+                        "description": "Whether to automatically compute and include element self-weight for cases with include_self_weight=True (default: True)",
+                        "default": True,
+                    },
                 },
                 "required": ["analysis_case_id"],
             },

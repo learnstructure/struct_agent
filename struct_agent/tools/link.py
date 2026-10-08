@@ -16,6 +16,7 @@ def import_from_sap2000(
     s2k_path: Union[str, Path],
     *,
     project_title: Optional[str] = None,
+    materialize_self_weight: bool = False,
 ) -> ToolResult:
     """
     Import a SAP2000 model text file (.s2k / .$2k) into a new struct_core.Project.
@@ -26,6 +27,12 @@ def import_from_sap2000(
         Path to the SAP2000 .s2k or .$2k text file.
     project_title : str, optional
         Title for the new Project (defaults to filename stem).
+    materialize_self_weight : bool, optional
+        Whether to explicitly materialize element self-weight loads into the model (default: False).
+        Note: fem2d and fem3d solvers automatically compute and apply self-weight during analysis
+        for cases with include_self_weight=True without needing to mutate the project model.
+        Leaving this False preserves a clean schema for roundtripping to SAP2000/ETABS without
+        duplicated distributed loads.
 
     Returns
     -------
@@ -58,9 +65,11 @@ def import_from_sap2000(
 
     try:
         reader = Sap2000FileReader()
-        model = reader.read_model(path)
-        project = Project(model=model)
-        project.metadata.title = project_title or path.stem
+        project = reader.read_project(path, title=project_title)
+        model = project.model
+        if materialize_self_weight:
+            from struct_load import apply_self_weight
+            apply_self_weight(project)
     except Exception as exc:
         return ToolResult.failure(
             "import_from_sap2000",
@@ -184,9 +193,8 @@ def import_from_etabs(
 
     try:
         reader = EtabsFileReader()
-        model = reader.read_model(path)
-        project = Project(model=model)
-        project.metadata.title = project_title or path.stem
+        project = reader.read_project(path, title=project_title)
+        model = project.model
     except Exception as exc:
         return ToolResult.failure(
             "import_from_etabs",

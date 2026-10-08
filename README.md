@@ -76,8 +76,8 @@ struct_agent/
 |   +-- agent.py              # StructAgent orchestrator (deterministic, no LLM)
 |   +-- tools/
 |   |   +-- base.py           # ToolResult, AgentError
-|   |   +-- model.py          # create_project, create_frame_model, build_structural_model, create_model_from_plan_draft, inspect_project, modify_project, save_project, load_project
-|   |   +-- loads.py          # apply_gravity_loads, apply_lateral_loads, generate_load_combinations
+|   |   +-- model.py          # create_project, create_frame_model, build_structural_model, create_model_from_plan_draft, inspect_project, modify_project, set_project_units, save_project, load_project
+|   |   +-- loads.py          # apply_gravity_loads, apply_self_weight, apply_lateral_loads, generate_load_combinations
 |   |   +-- link.py           # import_from_sap2000, export_to_sap2000, import_from_etabs, export_to_etabs
 |   |   +-- sizing.py         # preliminary_sizing
 |   |   +-- analysis.py       # run_analysis, inspect_analysis_results
@@ -193,6 +193,7 @@ from struct_agent import (
     preliminary_sizing,       # Heuristic RC member sizing from spans
     apply_gravity_loads,      # ASCE 7 occupancy live load & self-weight
     apply_lateral_loads,      # ASCE 7 seismic ELF & wind lateral loads
+    apply_self_weight,        # Compute and materialize element self-weight into member line loads
     generate_load_combinations,# ACI 318 / ASCE 7 factored load combinations
     import_from_sap2000,      # Ingest SAP2000 .s2k file into Project
     export_to_sap2000,        # Export Project model to SAP2000 .s2k
@@ -224,54 +225,320 @@ from struct_agent.vision import (
 )
 ```
 
-### Tool Signatures
+### Tool Architecture & Return Convention
 
-```python
-# Project & Model tools
-create_project(structural_model, *, title=None, author=None) -> ToolResult
-create_frame_model(*, bays=1, stories=1, bay_width=6.0, story_height=3.0, ...) -> StructuralModel
-build_structural_model(model_dict) -> ToolResult
-create_model_from_plan_draft(plan_draft, *, project=None, title=None) -> ToolResult
-inspect_project(project) -> ToolResult
-modify_project(project, mutator) -> ToolResult
-save_project(project, path) -> ToolResult
-load_project(path) -> ToolResult
+Every tool in `struct_agent` returns a deterministic [`ToolResult`](file:///c:/Users/lenovo/OneDrive%20-%20University%20of%20Nevada,%20Reno/extra%20research/structural_engineering/struct_agent/struct_agent/tools/base.py) object:
 
-# Commercial CAE link tools (struct_link)
-import_from_sap2000(s2k_path, *, project_title=None) -> ToolResult
-export_to_sap2000(project, *, output_path) -> ToolResult
-import_from_etabs(e2k_path, *, project_title=None) -> ToolResult
-export_to_etabs(project, *, output_path) -> ToolResult
+- `result.ok` (`bool`): `True` only when `result.status == "success"`.
+- `result.data` (`dict`): Structured outputs (e.g. modified `project`, summary statistics, file paths).
+- `result.summary` (`str`): Concise human- and LLM-readable summary string of what was performed.
+- `result.next_suggested_stage` (`str`): Recommended workflow stage advancement.
+- `result.error` (`AgentError` or `None`): Populated on failure with structured `error_type`, `message`, and recovery `possible_causes`.
 
-# Building load tools (struct_load)
-preliminary_sizing(project, *, material_id="Concrete_4ksi", fc_kpa=27580.0) -> ToolResult
-apply_gravity_loads(project, *, occupancy="office", tributary_width=5.0, superimposed_dead=1.5, include_self_weight=True) -> ToolResult
-apply_lateral_loads(project, *, code="ASCE7-22", sds=0.75, sd1=0.40, r_factor=8.0, wind_speed=None) -> ToolResult
-generate_load_combinations(project, *, standard="ACI318_LRFD") -> ToolResult
+---
 
-# Validation tool
-validate_model(model_or_project) -> ToolResult
+## Tool Reference & Documentation
 
-# Analysis tools (fem2d & fem3d)
-run_analysis(project, *, analysis_case_id, analysis_type="static", solver="auto", load_case_id=None, num_modes=6) -> ToolResult
-inspect_analysis_results(project, analysis_case_id) -> ToolResult
+### 1. Model & Project Lifecycle Tools
 
-# Dynamic tools (structdyn)
-run_time_history(project, *, analysis_case_id, earthquake="elcentro", direction="x", dt=None, scale_factor=1.0, damping_ratio=0.05, n_modes_damping=2, method="modal_superposition", solver="auto", envelope_to_design=True) -> ToolResult
-inspect_dynamic_results(project, analysis_case_id) -> ToolResult
+#### `create_project`
+Initializes a new `struct_core.Project` container wrapping an existing `StructuralModel`, dictionary, or creates an empty container.
+- **Signature:**
+  ```python
+  create_project(structural_model=None, *, title=None, author=None, model=None, nodes=None, elements=None, materials=None, sections=None, supports=None) -> ToolResult
+  ```
+- **Parameters:**
+  - `structural_model`: Optional existing `StructuralModel` instance or dictionary.
+  - `title`: Project title metadata string.
+  - `author`: Engineer / author name metadata string.
+  - `nodes`, `elements`, `materials`, `sections`, `supports`: Optional lists to build model geometry inline.
+- **Returns (`data`):** `{"project": Project, "title": str, "author": str, "n_nodes": int, "n_elements": int, "n_supports": int}`
+- **Example:**
+  ```python
+  res = create_project(title="Office Tower Study", author="Structural Team")
+  project = res.data["project"]
+  ```
 
-# Design & Detailing tools (aci318)
-run_design(project, *, design_case_id, design_code="ACI 318-19", analysis_case_id=None) -> ToolResult
-inspect_design_results(project, design_case_id) -> ToolResult
-inspect_detailing_results(project, design_case_id=None) -> ToolResult
+#### `create_frame_model`
+High-level parametric generator for regular orthogonal 2D plane frames or 3D space frames. Automatically provisions grid nodes, column/beam connectivity, standard concrete materials, rectangular sections, and base supports.
+- **Signature:**
+  ```python
+  create_frame_model(num_bays=2, bay_width=5.0, num_stories=2, story_height=3.0, *, title=None, author=None, dimension="2d", bay_widths=None, story_heights=None, support_type="fixed", col_b=0.4, col_h=0.4, beam_b=0.3, beam_h=0.5, fc_kpa=27580.0, rho_kg_m3=2400.0) -> ToolResult
+  ```
+- **Parameters:**
+  - `num_bays`: Number of horizontal bays (or list `bay_widths` for non-uniform spacing).
+  - `bay_width`: Uniform bay width in meters.
+  - `num_stories`: Number of vertical stories (or list `story_heights` for non-uniform floor heights).
+  - `story_height`: Uniform story height in meters.
+  - `dimension`: `"2d"` for plane frame, `"3d"` for space frame.
+  - `support_type`: Base boundary conditions (`"fixed"` or `"pinned"`).
+  - `col_b`, `col_h`, `beam_b`, `beam_h`: Column and beam cross-section dimensions (m).
+- **Returns (`data`):** `{"project": Project, "n_nodes": int, "n_elements": int, "n_columns": int, "n_beams": int, "stories": int, "bays": int, ...}`
+- **Example:**
+  ```python
+  res = create_frame_model(num_bays=3, bay_width=6.0, num_stories=4, story_height=3.5, dimension="3d")
+  project = res.data["project"]
+  ```
 
-# Drawing tools (struct_draw)
-generate_drawings(project, *, design_case_id, output_path, detailing_case_id=None) -> ToolResult
-```
+#### `build_structural_model`
+Constructs or augments arbitrary/irregular structural geometry (trusses, braced frames, angled members, bridges) directly from structured JSON lists.
+- **Signature:**
+  ```python
+  build_structural_model(project=None, *, nodes=None, elements=None, materials=None, sections=None, supports=None, title=None) -> ToolResult
+  ```
+- **Parameters:**
+  - `project`: Optional existing `Project` to populate or update; if `None`, creates a new one.
+  - `nodes`: List of dicts `[{"id": 1, "x": 0.0, "y": 0.0, "z": 0.0}, ...]`.
+  - `elements`: List of dicts `[{"id": "E1", "type": "beam"|"truss", "start_node": 1, "end_node": 2}, ...]`.
+  - `supports`: List of dicts `[{"node_id": 1, "fixity": "fixed"|"pinned"}, ...]`.
+- **Returns (`data`):** `{"project": Project, "n_nodes": int, "n_elements": int, "n_supports": int}`
+- **Example:**
+  ```python
+  res = build_structural_model(
+      nodes=[{"id": 1, "x": 0, "y": 0}, {"id": 2, "x": 6, "y": 0}, {"id": 3, "x": 3, "y": 2.5}],
+      elements=[{"id": "T1", "type": "truss", "start_node": 1, "end_node": 2}],
+      supports=[{"node_id": 1, "fixity": "pinned"}, {"node_id": 2, "fixity": "pinned"}]
+  )
+  ```
 
-Every tool returns `ToolResult`. `result.ok` is `True` only when
-`result.status == "success"`. Failures carry a structured `AgentError`
-with `error_type`, `message`, and `possible_causes`.
+#### `create_model_from_plan_draft`
+Compiles a complete 3D structural model from an architectural or structural floor plan draft (`FloorPlanDraft`) extracted from drawings (PDF, PNG, JPG) by Vision-Language Models.
+- **Signature:**
+  ```python
+  create_model_from_plan_draft(draft=None, project=None, **kwargs) -> ToolResult
+  ```
+- **Parameters:**
+  - `draft`: `FloorPlanDraft` instance or dictionary with `x_grids`, `y_grids`, `stories`, `columns`, `beams`.
+  - `project`: Optional existing `Project` container.
+- **Returns (`data`):** `{"project": Project, "title": str, "n_nodes": int, "n_elements": int, "n_columns": int, "n_beams": int, ...}`
+
+#### `inspect_project`
+Provides a human- and LLM-readable summary of project status, geometry counts, applied load cases, analysis cases, design checks, and detailing status.
+- **Signature:** `inspect_project(project) -> ToolResult`
+- **Returns (`data`):** `{"title": str, "units": dict, "model": dict, "load_cases": list, "analysis_cases": list, "design_cases": list, ...}`
+
+#### `modify_project`
+Applies an arbitrary callback mutator function safely to a `Project`, validating that the model remains well-formed.
+- **Signature:** `modify_project(project, mutator) -> ToolResult`
+
+#### `set_project_units`
+Explicitly defines or overrides unit system metadata on `project.metadata.units`.
+- **Signature:**
+  ```python
+  set_project_units(project, *, length=None, force=None, mass=None, temperature=None, time="s", name=None) -> ToolResult
+  ```
+- **Example:** `set_project_units(project, length="in", force="kip", mass="kip*s^2/in", name="us_customary")`
+
+#### `save_project` & `load_project`
+Full JSON serialization and deserialization round-trip for `struct_core.Project` containers.
+- **Signatures:**
+  ```python
+  save_project(project, path) -> ToolResult
+  load_project(path) -> ToolResult
+  ```
+
+---
+
+### 2. Commercial CAE Interoperability Tools (`struct_link`)
+
+#### `import_from_sap2000`
+Ingests SAP2000 `.s2k` or `.$2k` text files into a validated `Project`. Automatically extracts nodes, frame elements, sections, materials, supports, load cases/patterns, and unit system metadata.
+- **Signature:**
+  ```python
+  import_from_sap2000(s2k_path, *, project_title=None, materialize_self_weight=False) -> ToolResult
+  ```
+- **Parameters:**
+  - `s2k_path`: File path to the SAP2000 `.s2k` file.
+  - `project_title`: Optional title override.
+  - `materialize_self_weight`: When `True`, automatically computes and adds member self-weight line loads into the dead load case.
+- **Returns (`data`):** `{"project": Project, "n_nodes": int, "n_elements": int, "n_supports": int, "load_cases": list, "units": str}`
+- **Example:**
+  ```python
+  res = import_from_sap2000("frame.s2k", materialize_self_weight=True)
+  project = res.data["project"]
+  ```
+
+#### `export_to_sap2000`
+Exports a `Project` model to a native SAP2000 `.s2k` text file with full coordinate systems, joint restraints, frame section assignments, and material properties.
+- **Signature:** `export_to_sap2000(project, *, output_path) -> ToolResult`
+- **Returns (`data`):** `{"output_path": str, "file_size_bytes": int}`
+
+#### `import_from_etabs` & `export_to_etabs`
+Ingests from and exports to ETABS `.e2k` / `.$et` text files with full floor-story, grid, and framing connectivity preservation.
+- **Signatures:**
+  ```python
+  import_from_etabs(e2k_path, *, project_title=None) -> ToolResult
+  export_to_etabs(project, *, output_path) -> ToolResult
+  ```
+
+---
+
+### 3. Building Code Loading & Sizing Tools (`struct_load`)
+
+#### `preliminary_sizing`
+Performs rule-of-thumb span-to-depth structural member dimensioning for beams ($L/12$ to $L/16$) and columns based on tributary area and concrete compressive strength.
+- **Signature:**
+  ```python
+  preliminary_sizing(project, *, material_id="Concrete_4ksi", fc_kpa=27580.0) -> ToolResult
+  ```
+- **Returns (`data`):** `{"project": Project, "n_beams_sized": int, "n_columns_sized": int, "summary": dict}`
+
+#### `apply_gravity_loads`
+Applies ASCE 7 / IBC occupancy-based live loads (e.g. `"office"`, `"residential"`, `"classroom"`, `"storage"`) and superimposed dead loads distributed across member tributary widths.
+- **Signature:**
+  ```python
+  apply_gravity_loads(project, *, occupancy="office", tributary_width=5.0, superimposed_dead=1.5, include_self_weight=True) -> ToolResult
+  ```
+- **Parameters:**
+  - `occupancy`: ASCE 7 occupancy category name.
+  - `tributary_width`: Tributary floor width in meters (or feet).
+  - `superimposed_dead`: Additional dead load in kPa (or psf).
+  - `include_self_weight`: When `True`, automatically triggers self-weight calculations.
+- **Returns (`data`):** `{"project": Project, "load_cases_created": list, "total_gravity_load_kN": float}`
+
+#### `apply_self_weight`
+Computes the exact volumetric weight of all frame elements ($w = -\rho \cdot A \cdot g$) using material densities and section cross-sectional areas, and materializes continuous downward line loads directly into the target load case in the `Project` schema. (Note: `run_analysis` automatically computes and applies self-weight on the fly for any cases with `include_self_weight=True` without needing to mutate the project model; use `apply_self_weight` when you want to permanently bake element line loads into the schema).
+- **Signature:**
+  ```python
+  apply_self_weight(project, *, target_case_id=None, unit_system=None, direction=None) -> ToolResult
+  ```
+- **Parameters:**
+  - `target_case_id`: Load case name to append loads to (defaults to `"DEAD"` or `"SelfWeight"`).
+  - `unit_system`: `"si"`, `"us"`, or auto-detected from project metadata.
+  - `direction`: Gravity axis (`"z"` or `"-z"` for 3D, `"y"` or `"-y"` for 2D).
+- **Returns (`data`):** `{"project": Project, "target_case_id": str, "elements_loaded": int, "total_downward_load": float, "unit": str}`
+
+#### `apply_lateral_loads`
+Computes and applies ASCE 7-22 seismic Equivalent Lateral Force (ELF) vertical distribution and Main Wind Force Resisting System (MWFRS) wind pressures as nodal story forces.
+- **Signature:**
+  ```python
+  apply_lateral_loads(project, *, code="ASCE7-22", sds=0.75, sd1=0.40, r_factor=8.0, wind_speed=None) -> ToolResult
+  ```
+- **Parameters:**
+  - `sds`, `sd1`: Design spectral acceleration parameters ($S_{DS}, S_{D1}$).
+  - `r_factor`: Seismic response modification coefficient $R$.
+  - `wind_speed`: Basic wind speed in m/s (or mph).
+- **Returns (`data`):** `{"project": Project, "seismic_base_shear_kN": float, "wind_base_shear_kN": float, ...}`
+
+#### `generate_load_combinations`
+Generates standard factored strength design (LRFD) and serviceability (ASD) load combinations per ACI 318 / ASCE 7 (e.g. $1.4D$, $1.2D + 1.6L$, $1.2D + 1.0E + 1.0L$).
+- **Signature:**
+  ```python
+  generate_load_combinations(project, *, standard="ACI318_LRFD") -> ToolResult
+  ```
+- **Returns (`data`):** `{"project": Project, "combinations_generated": list}`
+
+---
+
+### 4. Validation Tool
+
+#### `validate_model`
+Validates model integrity per `struct_core` schema rules before solver execution: checks referential integrity (element start/end nodes, material and section references), flags duplicate IDs, catches zero-length elements, and confirms support fixity.
+- **Signature:** `validate_model(model_or_project) -> ToolResult`
+- **Returns (`data`):** `{"valid": bool, "warnings": list, "errors": list}`
+
+---
+
+### 5. Static & Modal FEM Analysis Tools (`fem2d` & `fem3d`)
+
+#### `run_analysis`
+Solves linear static equilibrium ($\mathbf{K}\mathbf{u} = \mathbf{f}$) or natural eigenvalue modal dynamics ($\mathbf{K}\boldsymbol{\phi} = \omega^2\mathbf{M}\boldsymbol{\phi}$). Automatically detects whether the structure is 2D or 3D and dispatches to `fem2d` or `fem3d`. Results are packaged into `AnalysisResult` and attached to `project.analysis_results`.
+- **Signature:**
+  ```python
+  run_analysis(project, *, analysis_case_id, analysis_type="static", solver="auto", load_case_id=None, num_modes=6, include_self_weight=True) -> ToolResult
+  ```
+- **Parameters:**
+  - `analysis_case_id`: Name identifier for this analysis run (e.g. `"Dead_Static"`, `"Modal"`).
+  - `analysis_type`: `"static"` or `"modal"`.
+  - `solver`: `"auto"` (recommended), `"fem2d"`, or `"fem3d"`.
+  - `load_case_id`: Target load case or combination to solve (for static).
+  - `num_modes`: Number of natural vibration modes to extract (for modal).
+  - `include_self_weight`: When `True` (default), automatically computes and includes member self-weight line loads via `struct_load` for any load cases with `include_self_weight=True` without mutating the project schema.
+- **Returns (`data`):** `{"project": Project, "analysis_case_id": str, "summary": dict}`
+- **Example:**
+  ```python
+  res = run_analysis(project, analysis_case_id="1.2D+1.6L", solver="auto")
+  ```
+
+#### `inspect_analysis_results`
+Extracts a structured engineering summary of analysis results: max nodal displacements, total base reactions, equilibrium checks, and peak member internal forces (axial $P$, shear $V$, bending moment $M$).
+- **Signature:** `inspect_analysis_results(project, analysis_case_id) -> ToolResult`
+- **Returns (`data`):** `{"analysis_case_id": str, "max_disp": float, "total_reactions": dict, "peak_forces": dict}`
+
+---
+
+### 6. Structural Dynamics Tools (`structdyn`)
+
+#### `run_time_history`
+Executes dynamic earthquake response history integration using `structdyn`. Bridges the model directly to an MDF dynamic system, runs numerical integration (modal superposition or Newmark-Beta), and envelopes peak member dynamic internal forces into an `AnalysisResult` ready for code design.
+- **Signature:**
+  ```python
+  run_time_history(project, *, analysis_case_id, earthquake="elcentro", direction="x", dt=None, scale_factor=1.0, damping_ratio=0.05, n_modes_damping=2, method="modal_superposition", solver="auto", envelope_to_design=True) -> ToolResult
+  ```
+- **Parameters:**
+  - `earthquake`: Named record (`"elcentro"`, `"kobe"`) or path to acceleration record.
+  - `direction`: Ground motion component (`"x"`, `"y"`, or `"z"`).
+  - `damping_ratio`: Modal or Rayleigh damping ratio $\zeta$ (default: $0.05$).
+  - `envelope_to_design`: When `True`, synthesizes peak dynamic $P, V_y, V_z, M_y, M_z$ into `AnalysisResult` for downstream ACI 318 design.
+- **Returns (`data`):** `{"project": Project, "analysis_case_id": str, "max_disp_m": float, "max_base_shear_kN": float, ...}`
+
+#### `inspect_dynamic_results`
+Summarizes peak dynamic responses, floor displacement envelopes, base shear time histories, and inter-story drift ratios.
+- **Signature:** `inspect_dynamic_results(project, analysis_case_id) -> ToolResult`
+
+---
+
+### 7. RC Design & Detailing Tools (`aci318`)
+
+#### `run_design`
+Runs reinforced concrete code checks per **ACI 318-19** using `aci318`. Evaluates beam flexure ($M_u \le \phi M_n$), beam shear ($V_u \le \phi V_n$), column axial-flexural P-M interaction, and shear ties. Synthesizes longitudinal bar layouts, stirrup schedules, and demand-capacity ratios (DCR).
+- **Signature:**
+  ```python
+  run_design(project, *, design_case_id, design_code="ACI 318-19", analysis_case_id=None) -> ToolResult
+  ```
+- **Returns (`data`):** `{"project": Project, "design_case_id": str, "summary": {"status": "PASS"|"FAIL", "max_dcr": float, ...}}`
+
+#### `inspect_design_results`
+Returns detailed member-by-member Demand-Capacity Ratios (DCR), governing load combinations, and pass/fail statuses.
+- **Signature:** `inspect_design_results(project, design_case_id) -> ToolResult`
+
+#### `inspect_detailing_results`
+Extracts reinforcement detailing summaries, rebar mark schedules, stirrup spacing per zone (hinging vs field), and total calculated reinforcement steel weight/tonnage.
+- **Signature:** `inspect_detailing_results(project, design_case_id=None) -> ToolResult`
+- **Returns (`data`):** `{"total_rebar_weight_kg": float, "total_rebar_weight_tons": float, "members": dict}`
+
+---
+
+### 8. Production CAD Drawing Generation (`struct_draw`)
+
+#### `generate_drawings`
+Produces production-ready DXF drawings compatible with AutoCAD, LibreCAD, and BricsCAD. Supports both **General Arrangement (GA)** framing plans/elevations and **Reinforced Concrete Rebar Detailing** with Bar Bending Schedule (BBS) tables.
+- **Signature:**
+  ```python
+  generate_drawings(
+      project,
+      *,
+      output_path,
+      drawing_type="auto",        # "framing", "detailing", or "auto"
+      view_mode="both",           # "plan", "elevation", or "both"
+      story_level=None,           # Specific story for framing plan (e.g. "FL1", 1)
+      grid_line=None,             # Specific grid line for elevation (e.g. "1", "A")
+      title=None,                 # Sheet title block text
+      scale=None,                 # "1:50", "1:100", "1/4\"=1'-0\""
+      unit=None,                  # "mm", "m", "in", "ft"
+      design_case_id=None,        # Design case ID for RC detailing
+      detailing_case_id=None,
+  ) -> ToolResult
+  ```
+- **Returns (`data`):** `{"output_path": str, "drawing_type": str, "file_size_bytes": int}`
+- **Examples:**
+  ```python
+  # 1. GA Framing drawing directly from model geometry
+  generate_drawings(project, output_path="framing.dxf", drawing_type="framing", view_mode="both")
+
+  # 2. RC Rebar Detailing sheet with BBS schedule table
+  generate_drawings(project, output_path="detailing.dxf", drawing_type="detailing", design_case_id="ACI318_Design")
+  ```
 
 ---
 
