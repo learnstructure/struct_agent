@@ -55,7 +55,9 @@ from .tools.design import (
 from .tools.loads import (
     apply_gravity_loads,
     apply_lateral_loads,
+    apply_roof_loads,
     apply_self_weight,
+    distribute_area_loads,
     generate_load_combinations,
 )
 from .tools.sizing import preliminary_sizing
@@ -117,6 +119,8 @@ __all__ = [
     "preliminary_sizing",
     "apply_gravity_loads",
     "apply_lateral_loads",
+    "apply_roof_loads",
+    "distribute_area_loads",
     "apply_self_weight",
     "generate_load_combinations",
     "validate_model",

@@ -4,11 +4,17 @@ Tests for load determination and preliminary sizing tools in struct_agent.
 
 import pytest
 from struct_core import (
+    AreaLoad,
     BeamElement,
+    ElasticMaterial,
+    LoadCase,
+    Metadata,
     Node,
     Project,
+    RectangularSection,
     StructuralModel,
     Support,
+    Units,
 )
 from struct_agent import (
     WorkflowStage,
@@ -16,7 +22,9 @@ from struct_agent import (
     preliminary_sizing,
     apply_gravity_loads,
     apply_lateral_loads,
+    apply_roof_loads,
     apply_self_weight,
+    distribute_area_loads,
     generate_load_combinations,
     validate_model,
     run_analysis,
@@ -40,6 +48,34 @@ def _build_bare_frame():
     supports = [Support.fixed(node_id=1), Support.fixed(node_id=4)]
     model = StructuralModel(nodes=nodes, elements=elements, supports=supports)
     return Project(model=model)
+
+
+def _build_3d_frame():
+    nodes = [
+        Node(id=1, x=0.0, y=0.0, z=0.0),
+        Node(id=2, x=6.0, y=0.0, z=0.0),
+        Node(id=3, x=6.0, y=5.0, z=0.0),
+        Node(id=4, x=0.0, y=5.0, z=0.0),
+        Node(id=5, x=0.0, y=0.0, z=3.5),
+        Node(id=6, x=6.0, y=0.0, z=3.5),
+        Node(id=7, x=6.0, y=5.0, z=3.5),
+        Node(id=8, x=0.0, y=5.0, z=3.5),
+    ]
+    mat = ElasticMaterial(id="CONC", E=2.5e7, nu=0.2, rho=2400.0)
+    col = RectangularSection(id="COL", name="C400", b=0.4, h=0.4)
+    bm = RectangularSection(id="BEAM", name="B300", b=0.3, h=0.5)
+    elements = [
+        BeamElement(id="C1", start_node=1, end_node=5, material_id="CONC", section_id="COL"),
+        BeamElement(id="C2", start_node=2, end_node=6, material_id="CONC", section_id="COL"),
+        BeamElement(id="C3", start_node=3, end_node=7, material_id="CONC", section_id="COL"),
+        BeamElement(id="C4", start_node=4, end_node=8, material_id="CONC", section_id="COL"),
+        BeamElement(id="B1", start_node=5, end_node=6, material_id="CONC", section_id="BEAM"),
+        BeamElement(id="B2", start_node=6, end_node=7, material_id="CONC", section_id="BEAM"),
+        BeamElement(id="B3", start_node=7, end_node=8, material_id="CONC", section_id="BEAM"),
+        BeamElement(id="B4", start_node=8, end_node=5, material_id="CONC", section_id="BEAM"),
+    ]
+    model = StructuralModel(nodes=nodes, elements=elements, materials=[mat], sections=[col, bm])
+    return Project(model=model, metadata=Metadata(units=Units(length="m", force="kN")))
 
 
 def test_preliminary_sizing_and_loading_flow():
@@ -99,7 +135,6 @@ def test_preliminary_sizing_and_loading_flow():
 
 
 def test_apply_self_weight_tool():
-    from struct_core import LoadCase
     project = _build_bare_frame()
     preliminary_sizing(project)
     project.model.load_cases = [LoadCase(id="DEAD", include_self_weight=True)]
@@ -108,3 +143,30 @@ def test_apply_self_weight_tool():
     assert res.ok is True
     assert res.data["total_element_loads"] == 3
     assert project.model.load_cases[0].include_self_weight is False
+
+
+def test_apply_roof_loads_tool():
+    project = _build_3d_frame()
+    res = apply_roof_loads(project, ground_snow_load=1.5, tributary_width=4.0)
+    assert res.ok is True
+    assert "cases_created" in res.data
+    assert "snow" in res.data["cases_created"]
+    assert "roof_live" in res.data["cases_created"]
+
+
+def test_distribute_area_loads_tool():
+    project = _build_3d_frame()
+    al = AreaLoad(
+        id="SLAB",
+        pressure=3.0,
+        load_type="live",
+        node_ids=[5, 6, 7, 8],
+        one_way=True,
+        span_direction_axis="x",
+    )
+    project.model.load_cases = [LoadCase(id="Live", area_loads=[al])]
+
+    res = distribute_area_loads(project, target_case_id="Live")
+    assert res.ok is True
+    assert res.data["distributed_loads_created"] == 2
+    assert len(project.model.load_cases[0].element_loads) == 2

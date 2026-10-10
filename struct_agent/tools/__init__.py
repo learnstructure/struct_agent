@@ -21,7 +21,9 @@ from .sizing import preliminary_sizing
 from .loads import (
     apply_gravity_loads,
     apply_lateral_loads,
+    apply_roof_loads,
     apply_self_weight,
+    distribute_area_loads,
     generate_load_combinations,
 )
 from .analysis import run_analysis, inspect_analysis_results
@@ -48,6 +50,8 @@ __all__ = [
     "preliminary_sizing",
     "apply_gravity_loads",
     "apply_lateral_loads",
+    "apply_roof_loads",
+    "distribute_area_loads",
     "apply_self_weight",
     "generate_load_combinations",
     "run_analysis",

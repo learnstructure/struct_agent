@@ -19,9 +19,11 @@ def apply_gravity_loads(
     superimposed_dead: float = 1.5,
     include_self_weight: bool = True,
     custom_live_load: Optional[float] = None,
+    unit_system: Optional[str] = None,
 ) -> ToolResult:
     """
     Apply code-compliant Dead and Live gravity loads to a Project's structural model.
+    Automatically senses 2D (wy) vs 3D (wz) geometry and infers units from project metadata.
 
     Parameters
     ----------
@@ -37,6 +39,8 @@ def apply_gravity_loads(
         Whether to calculate element self-weight from sections and density.
     custom_live_load : float, optional
         Custom live load pressure override.
+    unit_system : str, optional
+        'si' or 'us'. If None, auto-inferred from project metadata.
 
     Returns
     -------
@@ -65,7 +69,7 @@ def apply_gravity_loads(
         )
 
     try:
-        generator = LoadGenerator(unit_system="si")
+        generator = LoadGenerator(unit_system=unit_system)
         dead_case, live_case = generator.apply_gravity_loads(
             project,
             occupancy=occupancy,
@@ -108,9 +112,12 @@ def apply_lateral_loads(
     wind_speed: Optional[float] = None,
     exposure_category: str = "B",
     tributary_width: float = 5.0,
+    direction: str = "both",
+    unit_system: Optional[str] = None,
 ) -> ToolResult:
     """
     Calculate and apply ASCE 7 seismic (ELF) and/or wind (MWFRS) lateral forces to the structural model.
+    Computes exact model-derived story seismic weights and supports directional lateral loads.
     """
     if project is None or getattr(project, "model", None) is None:
         return ToolResult.failure(
@@ -133,32 +140,40 @@ def apply_lateral_loads(
         )
 
     results_data = {}
-    generator = LoadGenerator(unit_system="si")
+    generator = LoadGenerator(unit_system=unit_system)
 
     try:
         # Apply seismic if SDS provided
         if sds is not None and sd1 is not None:
-            eq_case, elf_res = generator.apply_lateral_seismic(
+            eq_result, elf_res = generator.apply_lateral_seismic(
                 project,
                 sds=sds,
                 sd1=sd1,
                 r_factor=r_factor,
                 system_type=system_type,
                 tributary_width=tributary_width,
+                direction=direction,
             )
-            results_data["seismic_case_id"] = eq_case.id
+            if isinstance(eq_result, list):
+                results_data["seismic_case_ids"] = [c.id for c in eq_result]
+            else:
+                results_data["seismic_case_id"] = eq_result.id
             results_data["seismic_base_shear"] = elf_res.base_shear
             results_data["seismic_story_forces"] = elf_res.story_forces
 
         # Apply wind if wind_speed provided
         if wind_speed is not None and wind_speed > 0:
-            w_case, wind_res = generator.apply_lateral_wind(
+            w_result, wind_res = generator.apply_lateral_wind(
                 project,
                 basic_wind_speed=wind_speed,
                 exposure_category=exposure_category,
                 tributary_width=tributary_width,
+                direction=direction,
             )
-            results_data["wind_case_id"] = w_case.id
+            if isinstance(w_result, list):
+                results_data["wind_case_ids"] = [c.id for c in w_result]
+            else:
+                results_data["wind_case_id"] = w_result.id
             results_data["wind_base_shear"] = wind_res.total_base_shear
             results_data["wind_story_forces"] = wind_res.story_forces
 
@@ -178,10 +193,135 @@ def apply_lateral_loads(
     )
 
 
+def apply_roof_loads(
+    project: Any,
+    *,
+    ground_snow_load: Optional[float] = None,
+    roof_live_load: Optional[float] = None,
+    tributary_width: float = 5.0,
+    exposure_factor_ce: float = 1.0,
+    thermal_factor_ct: float = 1.0,
+    importance_factor: float = 1.0,
+    unit_system: Optional[str] = None,
+) -> ToolResult:
+    """
+    Calculate and apply ASCE 7 Snow and/or Roof Live loads to roof framing beams.
+    """
+    if project is None or getattr(project, "model", None) is None:
+        return ToolResult.failure(
+            "apply_roof_loads",
+            AgentError(
+                error_type="missing_input",
+                message="No valid Project provided to apply_roof_loads.",
+            ),
+        )
+
+    try:
+        from struct_load import LoadGenerator
+    except ImportError as exc:
+        return ToolResult.failure(
+            "apply_roof_loads",
+            AgentError(
+                error_type="dependency_error",
+                message=f"struct_load is unavailable: {exc}",
+            ),
+        )
+
+    try:
+        generator = LoadGenerator(unit_system=unit_system)
+        created = generator.apply_roof_loads(
+            project,
+            ground_snow_load=ground_snow_load,
+            roof_live_load=roof_live_load,
+            tributary_width=tributary_width,
+            exposure_factor_ce=exposure_factor_ce,
+            thermal_factor_ct=thermal_factor_ct,
+            importance_factor=importance_factor,
+        )
+    except Exception as exc:
+        return ToolResult.failure(
+            "apply_roof_loads",
+            AgentError(
+                error_type="load_generation_failure",
+                message=f"Failed to apply roof loads: {exc}",
+            ),
+        )
+
+    return ToolResult.success(
+        "apply_roof_loads",
+        data={
+            "cases_created": list(created.keys()),
+            "load_case_ids": [c.id for c in created.values()],
+        },
+        next_suggested_stage="LOADS_APPLIED",
+    )
+
+
+def distribute_area_loads(
+    project: Any,
+    *,
+    target_case_id: Optional[str] = None,
+    load_type_filter: Optional[str] = None,
+    use_equivalent_uniform: bool = True,
+    design_action: str = "moment",
+) -> ToolResult:
+    """
+    Map surface pressures from AreaLoad schemas onto perimeter beam elements using tributary strips.
+    """
+    if project is None or getattr(project, "model", None) is None:
+        return ToolResult.failure(
+            "distribute_area_loads",
+            AgentError(
+                error_type="missing_input",
+                message="No valid Project provided to distribute_area_loads.",
+            ),
+        )
+
+    try:
+        from struct_load import LoadGenerator
+    except ImportError as exc:
+        return ToolResult.failure(
+            "distribute_area_loads",
+            AgentError(
+                error_type="dependency_error",
+                message=f"struct_load is unavailable: {exc}",
+            ),
+        )
+
+    try:
+        generator = LoadGenerator()
+        n_loads = generator.distribute_area_loads(
+            project,
+            target_case_id=target_case_id,
+            load_type_filter=load_type_filter,
+            use_equivalent_uniform=use_equivalent_uniform,
+            design_action=design_action,
+        )
+    except Exception as exc:
+        return ToolResult.failure(
+            "distribute_area_loads",
+            AgentError(
+                error_type="load_generation_failure",
+                message=f"Failed to distribute area loads: {exc}",
+            ),
+        )
+
+    return ToolResult.success(
+        "distribute_area_loads",
+        data={
+            "distributed_loads_created": n_loads,
+            "target_case_id": target_case_id,
+        },
+        next_suggested_stage="LOADS_APPLIED",
+    )
+
+
 def generate_load_combinations(
     project: Any,
     *,
     standard: str = "ACI318_LRFD",
+    unit_system: Optional[str] = None,
+    orthogonal_seismic: bool = True,
 ) -> ToolResult:
     """
     Scan existing load cases in the project model and generate standard factored load combinations.
@@ -207,8 +347,12 @@ def generate_load_combinations(
         )
 
     method = "LRFD" if "LRFD" in standard.upper() else "ASD"
-    generator = LoadGenerator(unit_system="si")
-    combs = generator.generate_combinations(project, design_method=method)
+    generator = LoadGenerator(unit_system=unit_system)
+    combs = generator.generate_combinations(
+        project,
+        design_method=method,
+        orthogonal_seismic=orthogonal_seismic,
+    )
 
     return ToolResult.success(
         "generate_load_combinations",
@@ -231,27 +375,6 @@ def apply_self_weight(
 ) -> ToolResult:
     """
     Materialize member self-weight distributed loads for any load case where include_self_weight=True.
-
-    Note: When analyzing with run_analysis, solvers (fem2d and fem3d) automatically compute
-    and include element self-weight on the fly for cases with include_self_weight=True.
-    Calling apply_self_weight explicitly writes DistributedLoad items directly into the
-    Project schema (and sets include_self_weight=False to prevent double-counting).
-
-    Parameters
-    ----------
-    project : Project
-        The project container holding the structural model.
-    target_case_id : str, optional
-        Target load case ID if no case currently has include_self_weight=True.
-    unit_system : str, optional
-        'si' or 'us'. If omitted, automatically inferred from project.metadata.units.
-    direction : str, optional
-        Gravity direction: '-z' for 3D frames or '-y' for 2D plane frames. Inferred if omitted.
-
-    Returns
-    -------
-    ToolResult
-        Success ToolResult with summary of materialized loads.
     """
     if project is None or getattr(project, "model", None) is None:
         return ToolResult.failure(
