@@ -57,6 +57,7 @@ from .tools.loads import (
     apply_lateral_loads,
     apply_roof_loads,
     apply_self_weight,
+    define_mass_source,
     distribute_area_loads,
     generate_load_combinations,
 )
@@ -122,6 +123,7 @@ __all__ = [
     "apply_roof_loads",
     "distribute_area_loads",
     "apply_self_weight",
+    "define_mass_source",
     "generate_load_combinations",
     "validate_model",
     "run_analysis",

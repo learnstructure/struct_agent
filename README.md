@@ -473,10 +473,11 @@ Extracts a structured engineering summary of analysis results: max nodal displac
 Executes dynamic earthquake response history integration using `structdyn`. Bridges the model directly to an MDF dynamic system, runs numerical integration (modal superposition or Newmark-Beta), and envelopes peak member dynamic internal forces into an `AnalysisResult` ready for code design.
 - **Signature:**
   ```python
-  run_time_history(project, *, analysis_case_id, earthquake="elcentro", direction="x", dt=None, scale_factor=1.0, damping_ratio=0.05, n_modes_damping=2, method="modal_superposition", solver="auto", envelope_to_design=True) -> ToolResult
+  run_time_history(project, *, analysis_case_id, ground_motion="elcentro", component=None, direction="x", dt=None, scale_factor=1.0, damping_ratio=0.05, n_modes_damping=2, method="newmark_beta", solver="auto", envelope_to_design=True) -> ToolResult
   ```
 - **Parameters:**
-  - `earthquake`: Named record (`"elcentro"`, `"kobe"`) or path to acceleration record.
+  - `ground_motion`: Ground motion name (`"elcentro"`, `"northridge"`, `"northridge:hor2"`), `GroundMotion` object, or array.
+  - `component`: Specific component (`"hor1"`, `"hor2"`, `"up"`). Inferred from `direction` if omitted.
   - `direction`: Ground motion component (`"x"`, `"y"`, or `"z"`).
   - `damping_ratio`: Modal or Rayleigh damping ratio $\zeta$ (default: $0.05$).
   - `envelope_to_design`: When `True`, synthesizes peak dynamic $P, V_y, V_z, M_y, M_z$ into `AnalysisResult` for downstream ACI 318 design.
@@ -621,7 +622,7 @@ print(f"Fundamental Period T1 = {T1:.3f} s")
 res_th = run_time_history(
     project,
     analysis_case_id="Earthquake_ElCentro",
-    earthquake="elcentro",
+    ground_motion="elcentro",
     direction="x",
     scale_factor=1.0,
     damping_ratio=0.05,

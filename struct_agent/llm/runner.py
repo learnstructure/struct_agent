@@ -35,6 +35,7 @@ from ..tools import (
     preliminary_sizing,
     run_analysis,
     run_time_history,
+    run_response_spectrum,
     inspect_dynamic_results,
     run_design,
 )
@@ -136,6 +137,7 @@ class AgentRunner:
             "run_analysis": run_analysis,
             "inspect_analysis_results": inspect_analysis_results,
             "run_time_history": run_time_history,
+            "run_response_spectrum": run_response_spectrum,
             "inspect_dynamic_results": inspect_dynamic_results,
             "run_design": run_design,
             "inspect_design_results": inspect_design_results,
@@ -180,6 +182,7 @@ class AgentRunner:
             "run_analysis",
             "inspect_analysis_results",
             "run_time_history",
+            "run_response_spectrum",
             "inspect_dynamic_results",
             "run_design",
             "inspect_design_results",

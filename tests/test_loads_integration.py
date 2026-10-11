@@ -170,3 +170,21 @@ def test_distribute_area_loads_tool():
     assert res.ok is True
     assert res.data["distributed_loads_created"] == 2
     assert len(project.model.load_cases[0].element_loads) == 2
+
+
+def test_define_mass_source_tool():
+    from struct_agent import define_mass_source
+    project = _build_3d_frame()
+    preliminary_sizing(project)
+    apply_gravity_loads(project, occupancy="office")
+
+    res = define_mass_source(
+        project,
+        factors={"DEAD": 1.0, "LIVE": 0.25},
+        include_element_mass=True,
+    )
+    assert res.ok is True
+    assert res.data["total_weight"] > 0.0
+    assert res.data["total_mass"] > 0.0
+    assert len(res.data["story_masses"]) > 0
+    assert project.model.mass_source is not None

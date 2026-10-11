@@ -23,11 +23,12 @@ from .loads import (
     apply_lateral_loads,
     apply_roof_loads,
     apply_self_weight,
+    define_mass_source,
     distribute_area_loads,
     generate_load_combinations,
 )
 from .analysis import run_analysis, inspect_analysis_results
-from .dynamics import run_time_history, inspect_dynamic_results
+from .dynamics import run_time_history, run_response_spectrum, inspect_dynamic_results
 from .design import run_design, inspect_design_results, inspect_detailing_results
 from .drawing import generate_drawings, generate_framing_drawings
 from .link import (
@@ -53,10 +54,12 @@ __all__ = [
     "apply_roof_loads",
     "distribute_area_loads",
     "apply_self_weight",
+    "define_mass_source",
     "generate_load_combinations",
     "run_analysis",
     "inspect_analysis_results",
     "run_time_history",
+    "run_response_spectrum",
     "inspect_dynamic_results",
     "run_design",
     "inspect_design_results",

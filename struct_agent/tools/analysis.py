@@ -43,6 +43,7 @@ def run_analysis(
     num_modes: int = 6,
     include_self_weight: bool = True,
     include_shear_deformation: Optional[bool] = None,
+    mass_source: Optional[Any] = None,
 ) -> ToolResult:
     """
     Run finite element analysis through the struct_core adapters (fem2d or fem3d).
@@ -68,6 +69,8 @@ def run_analysis(
         load case where ``include_self_weight=True`` (default: True).
     include_shear_deformation
         Whether to consider Timoshenko shear deformation in frame/beam elements.
+    mass_source
+        Optional MassSource definition or ID to use for dynamic mass matrix assembly.
     """
     if project is None or getattr(project, "model", None) is None:
         return ToolResult.failure(
@@ -224,10 +227,18 @@ def run_analysis(
         try:
             if resolved_solver == "fem2d":
                 from fem2d.adapters import model_from_core as fem2d_model_from_core
-                structure = fem2d_model_from_core(project, include_shear_deformation=include_shear_deformation)
+                structure = fem2d_model_from_core(
+                    project,
+                    include_shear_deformation=include_shear_deformation,
+                    mass_source=mass_source,
+                )
             else:
                 from fem3d.adapters import model_from_core as fem3d_model_from_core
-                structure = fem3d_model_from_core(project, include_shear_deformation=include_shear_deformation)
+                structure = fem3d_model_from_core(
+                    project,
+                    include_shear_deformation=include_shear_deformation,
+                    mass_source=mass_source,
+                )
 
             structure.number_dofs()
             structure.apply_boundary_conditions()
@@ -308,12 +319,20 @@ def run_analysis(
             analysis_case_id=analysis_case_id,
             modal_result=ModalResult(modes=mode_shapes),
         )
+    elif analysis_type in ("response_spectrum", "rsa"):
+        from .dynamics import run_response_spectrum
+        return run_response_spectrum(
+            project,
+            analysis_case_id=analysis_case_id,
+            solver=resolved_solver,
+            n_modes=num_modes,
+        )
     else:
         return ToolResult.failure(
             "run_analysis",
             AgentError(
                 error_type="unsupported_analysis_type",
-                message=f"Analysis type {analysis_type!r} is not supported. Use 'static' or 'modal'.",
+                message=f"Analysis type {analysis_type!r} is not supported. Use 'static', 'modal', or 'response_spectrum'.",
                 possible_causes=["Unsupported analysis type"],
             ),
         )

@@ -421,3 +421,103 @@ def apply_self_weight(
         },
         next_suggested_stage="LOADS_APPLIED",
     )
+
+
+def define_mass_source(
+    project: Any,
+    *,
+    name: str = "Default",
+    factors: Optional[dict[str, float]] = None,
+    include_element_mass: bool = True,
+    include_added_mass: bool = True,
+    lateral_only: bool = False,
+) -> ToolResult:
+    """
+    Define a commercial-grade Mass Source (m = sum c_i * W_i / g) for dynamic/seismic analysis.
+
+    Parameters
+    ----------
+    project : Any
+        The project container holding the structural model.
+    name : str
+        Identifier for this mass source definition (default: "Default").
+    factors : dict[str, float], optional
+        Load case factors converting load to mass (e.g. {"DEAD": 1.0, "LIVE": 0.25}).
+    include_element_mass : bool
+        Whether to include structural element self-masses (rho * A * L) (default: True).
+    include_added_mass : bool
+        Whether to include lumped nodal/element masses (default: True).
+    lateral_only : bool
+        Whether dynamic mass participates only in lateral translational DOFs.
+
+    Returns
+    -------
+    ToolResult
+        Success result with total seismic weight, total mass, and center of mass,
+        or structured AgentError.
+    """
+    if project is None or getattr(project, "model", None) is None:
+        return ToolResult.failure(
+            "define_mass_source",
+            AgentError(
+                error_type="missing_input",
+                message="No valid Project provided to define_mass_source.",
+            ),
+        )
+
+    try:
+        from struct_core import MassSource, MassSourceFactor
+        from struct_load import calculate_mass_source
+    except ImportError as exc:
+        return ToolResult.failure(
+            "define_mass_source",
+            AgentError(
+                error_type="dependency_error",
+                message=f"Required packages (struct_core / struct_load) unavailable: {exc}",
+            ),
+        )
+
+    try:
+        factor_objs = []
+        if factors:
+            for lc_id, f in factors.items():
+                factor_objs.append(MassSourceFactor(load_case_id=lc_id, factor=float(f)))
+
+        ms = MassSource(
+            id=name,
+            name=name,
+            factors=factor_objs,
+            include_element_mass=include_element_mass,
+            include_added_mass=include_added_mass,
+            lateral_only=lateral_only,
+        )
+
+        project.model.mass_source = ms
+        if not hasattr(project.model, "mass_sources") or project.model.mass_sources is None:
+            project.model.mass_sources = []
+        project.model.mass_sources.append(ms)
+
+        # Evaluate seismic weight & mass distribution
+        eval_res = calculate_mass_source(project.model, mass_source=ms)
+
+    except Exception as exc:
+        return ToolResult.failure(
+            "define_mass_source",
+            AgentError(
+                error_type="mass_source_failure",
+                message=f"Failed to define/calculate mass source: {exc}",
+            ),
+        )
+
+    return ToolResult.success(
+        "define_mass_source",
+        data={
+            "mass_source_id": ms.id,
+            "total_weight": eval_res.total_weight,
+            "total_mass": eval_res.total_mass,
+            "center_of_mass": eval_res.center_of_mass,
+            "story_masses": eval_res.story_masses,
+            "factors": {f.load_case_id: f.factor for f in ms.factors},
+        },
+        next_suggested_stage="MASS_SOURCE_DEFINED",
+    )

@@ -86,7 +86,7 @@ def run_dynamic_pipeline():
     th_res = run_time_history(
         project,
         analysis_case_id="Earthquake_ElCentro",
-        earthquake="elcentro",
+        ground_motion="elcentro",
         direction="x",
         damping_ratio=0.05,  # 5% critical damping
         n_modes_damping=3,

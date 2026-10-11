@@ -26,7 +26,11 @@ from struct_core import (
 from struct_agent.llm.runner import AgentRunner
 from struct_agent.tools.analysis import inspect_analysis_results, run_analysis
 from struct_agent.tools.design import inspect_design_results, run_design
-from struct_agent.tools.dynamics import inspect_dynamic_results, run_time_history
+from struct_agent.tools.dynamics import (
+    inspect_dynamic_results,
+    run_response_spectrum,
+    run_time_history,
+)
 from struct_agent.tools.model import create_project
 
 
@@ -167,7 +171,7 @@ def test_2d_time_history_elcentro():
     res = run_time_history(
         proj,
         analysis_case_id="TH_ElCentro_2D",
-        earthquake="elcentro",
+        ground_motion="elcentro",
         direction="x",
         damping_ratio=0.05,
         solver="auto",
@@ -201,7 +205,7 @@ def test_3d_time_history_elcentro():
     res = run_time_history(
         proj,
         analysis_case_id="TH_ElCentro_3D",
-        earthquake="elcentro",
+        ground_motion="elcentro",
         direction="x",
         damping_ratio=0.05,
         solver="auto",
@@ -220,7 +224,7 @@ def test_inspect_dynamic_results():
     run_time_history(
         proj,
         analysis_case_id="TH_Case1",
-        earthquake="elcentro",
+        ground_motion="elcentro",
         direction="x",
     )
 
@@ -244,7 +248,7 @@ def test_dynamic_design_pipeline():
     th_res = run_time_history(
         proj,
         analysis_case_id="Earthquake_Envelope",
-        earthquake="elcentro",
+        ground_motion="elcentro",
         direction="x",
         envelope_to_design=True,
     )
@@ -287,7 +291,7 @@ def test_agent_runner_tool_dispatch():
     # Dispatch run_time_history through runner's execution layer
     res = runner._execute_tool(
         "run_time_history",
-        {"analysis_case_id": "TH_Runner_Test", "earthquake": "elcentro", "direction": "x"},
+        {"analysis_case_id": "TH_Runner_Test", "ground_motion": "elcentro", "direction": "x"},
     )
     assert res.ok
     assert "TH_Runner_Test" in runner.project.analysis_results
@@ -299,3 +303,102 @@ def test_agent_runner_tool_dispatch():
     )
     assert insp.ok
     assert insp.data["has_time_history"] is True
+
+
+def test_run_response_spectrum_2d_and_design():
+    """Verify run_response_spectrum on 2D frame feeds into ACI 318 run_design."""
+    proj = _build_2d_frame_project()
+
+    rsa_res = run_response_spectrum(
+        proj,
+        analysis_case_id="RSA_Case_1",
+        sds=1.0,
+        sd1=0.6,
+        direction="x",
+        combination="CQC",
+        envelope_to_design=True,
+    )
+    assert rsa_res.ok, f"RSA failed: {rsa_res.error}"
+    assert "combined_base_shear" in rsa_res.data
+    assert rsa_res.data["combined_base_shear"] > 0.0
+    assert "cumulative_mass_participation" in rsa_res.data
+
+    # Verify ACI 318 design against the RSA envelope
+    design_res = run_design(
+        proj,
+        design_case_id="ACI318_RSA",
+        analysis_case_id="RSA_Case_1",
+    )
+    assert design_res.ok, f"Design failed: {design_res.error}"
+    assert "governing_dcr" in design_res.data
+    assert design_res.data["governing_dcr"] > 0.0
+
+
+def test_run_response_spectrum_3d():
+    """Verify run_response_spectrum on 3D frame."""
+    proj = _build_3d_frame_project()
+
+    rsa_res = run_response_spectrum(
+        proj,
+        analysis_case_id="RSA_3D_Case",
+        sds=1.0,
+        sd1=0.6,
+        direction="x",
+        combination="CQC",
+    )
+    assert rsa_res.ok, f"RSA 3D failed: {rsa_res.error}"
+    assert rsa_res.data["combined_base_shear"] > 0.0
+    assert "RSA_3D_Case" in proj.analysis_results
+
+
+def test_runner_response_spectrum_dispatch():
+    """Verify AgentRunner dispatches run_response_spectrum."""
+    from struct_agent.llm import BaseLLMProvider, LLMResponse
+
+    class _MockProvider(BaseLLMProvider):
+        def __init__(self):
+            super().__init__(model="mock")
+        def generate(self, messages, tools=None, temperature=0.0):
+            return LLMResponse(content="done")
+        def generate_stream(self, messages, tools=None, temperature=0.0):
+            yield from ()
+            return LLMResponse(content="done")
+
+    proj = _build_2d_frame_project()
+    runner = AgentRunner(provider=_MockProvider())
+    runner.project = proj
+
+    res = runner._execute_tool(
+        "run_response_spectrum",
+        {"analysis_case_id": "RSA_Runner", "sds": 1.0, "sd1": 0.6, "direction": "x"},
+    )
+    assert res.ok
+    assert "RSA_Runner" in runner.project.analysis_results
+
+
+def test_peer_earthquakes_integration():
+    """Verify built-in PEER earthquake records (e.g. Northridge) in struct_agent tools."""
+    proj = _build_2d_frame_project()
+
+    # 1. run_time_history with Northridge record
+    th_res = run_time_history(
+        proj,
+        analysis_case_id="TH_Northridge",
+        ground_motion="northridge",
+        direction="x",
+    )
+    assert th_res.ok
+    assert "TH_Northridge" in proj.analysis_results
+
+    # 2. run_response_spectrum with Northridge record
+    rsa_res = run_response_spectrum(
+        proj,
+        analysis_case_id="RSA_Northridge",
+        ground_motion="northridge",
+        direction="x",
+    )
+    assert rsa_res.ok
+    assert "RSA_Northridge" in proj.analysis_results
+    assert rsa_res.data["combined_base_shear"] > 0.0
+
+
