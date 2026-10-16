@@ -41,16 +41,52 @@ class WorkflowStage(str, Enum):
     DRAWINGS_GENERATED = "DRAWINGS_GENERATED"
 
 
-# Allowed forward transitions in the workflow.
+# Allowed transitions in the workflow (including iterative reflection/optimization loops).
 _ALLOWED: Dict[WorkflowStage, List[WorkflowStage]] = {
-    WorkflowStage.UNKNOWN: [WorkflowStage.MODEL_CREATED],
-    WorkflowStage.MODEL_CREATED: [WorkflowStage.LOADS_APPLIED, WorkflowStage.MODEL_VALIDATED],
-    WorkflowStage.LOADS_APPLIED: [WorkflowStage.MODEL_VALIDATED],
-    WorkflowStage.MODEL_VALIDATED: [WorkflowStage.ANALYSIS_COMPLETE],
-    WorkflowStage.ANALYSIS_COMPLETE: [WorkflowStage.DESIGN_COMPLETE],
-    WorkflowStage.DESIGN_COMPLETE: [WorkflowStage.DETAILING_COMPLETE],
-    WorkflowStage.DETAILING_COMPLETE: [WorkflowStage.DRAWINGS_GENERATED],
-    WorkflowStage.DRAWINGS_GENERATED: [WorkflowStage.DRAWINGS_GENERATED],
+    WorkflowStage.UNKNOWN: [
+        WorkflowStage.MODEL_CREATED,
+    ],
+    WorkflowStage.MODEL_CREATED: [
+        WorkflowStage.MODEL_CREATED,
+        WorkflowStage.LOADS_APPLIED,
+        WorkflowStage.MODEL_VALIDATED,
+    ],
+    WorkflowStage.LOADS_APPLIED: [
+        WorkflowStage.MODEL_CREATED,
+        WorkflowStage.LOADS_APPLIED,
+        WorkflowStage.MODEL_VALIDATED,
+    ],
+    WorkflowStage.MODEL_VALIDATED: [
+        WorkflowStage.MODEL_CREATED,
+        WorkflowStage.LOADS_APPLIED,
+        WorkflowStage.MODEL_VALIDATED,
+        WorkflowStage.ANALYSIS_COMPLETE,
+    ],
+    WorkflowStage.ANALYSIS_COMPLETE: [
+        WorkflowStage.MODEL_CREATED,      # Reflection: resizing/modifying model
+        WorkflowStage.LOADS_APPLIED,      # Modifying load definitions
+        WorkflowStage.MODEL_VALIDATED,
+        WorkflowStage.ANALYSIS_COMPLETE,  # Re-running analysis (modal/RSA/static)
+        WorkflowStage.DESIGN_COMPLETE,
+    ],
+    WorkflowStage.DESIGN_COMPLETE: [
+        WorkflowStage.MODEL_CREATED,      # Closed-loop reflection: resizing overstressed members
+        WorkflowStage.MODEL_VALIDATED,
+        WorkflowStage.ANALYSIS_COMPLETE,  # Re-solve after section change
+        WorkflowStage.DESIGN_COMPLETE,    # Re-check design
+        WorkflowStage.DETAILING_COMPLETE, # Compliant design -> detailing
+        WorkflowStage.DRAWINGS_GENERATED, # Direct drawing generation
+    ],
+    WorkflowStage.DETAILING_COMPLETE: [
+        WorkflowStage.MODEL_CREATED,      # Reflection if detailing congestion requires resizing
+        WorkflowStage.DESIGN_COMPLETE,
+        WorkflowStage.DETAILING_COMPLETE,
+        WorkflowStage.DRAWINGS_GENERATED,
+    ],
+    WorkflowStage.DRAWINGS_GENERATED: [
+        WorkflowStage.MODEL_CREATED,      # Redesign / revision cycle
+        WorkflowStage.DRAWINGS_GENERATED,
+    ],
 }
 
 
@@ -114,7 +150,9 @@ class ProjectState:
         self.stage = stage
 
     def requires(self, stage: WorkflowStage) -> bool:
-        """Return True if the workflow has already reached ``stage``."""
+        """Return True if the workflow has already reached or passed ``stage``."""
+        if stage in self.history:
+            return True
         order = [
             WorkflowStage.MODEL_CREATED,
             WorkflowStage.LOADS_APPLIED,

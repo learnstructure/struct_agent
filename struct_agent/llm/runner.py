@@ -8,11 +8,14 @@ structural engineering tool layer.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Callable, Dict, Generator, List, Optional, Union
+
+logger = logging.getLogger(__name__)
 
 from struct_core import Project
 
-from ..state.project_state import ProjectState, WorkflowStage
+from ..state.project_state import ProjectState, StageTransitionError, WorkflowStage
 from ..tools import (
     apply_gravity_loads,
     apply_lateral_loads,
@@ -99,13 +102,14 @@ class AgentRunner:
         custom_instructions: str = "",
         max_turns: int = 15,
         temperature: float = 0.0,
+        timeout: Optional[float] = None,
     ):
         target_base = base_url or api_base
         if isinstance(provider, BaseLLMProvider):
             self.provider = provider
         else:
             self.provider = get_provider(
-                provider=provider, model=model, api_key=api_key, api_base=target_base
+                provider=provider, model=model, api_key=api_key, api_base=target_base, timeout=timeout
             )
 
         self.max_turns = max_turns
@@ -177,6 +181,7 @@ class AgentRunner:
             "preliminary_sizing",
             "apply_gravity_loads",
             "apply_lateral_loads",
+            "apply_self_weight",
             "generate_load_combinations",
             "validate_model",
             "run_analysis",
@@ -286,8 +291,8 @@ class AgentRunner:
                 if result.ok and result.next_suggested_stage:
                     try:
                         self.state.advance_to(WorkflowStage(result.next_suggested_stage))
-                    except Exception:
-                        pass
+                    except (ValueError, KeyError, StageTransitionError) as e:
+                        logger.warning("Could not advance to suggested stage '%s': %s", result.next_suggested_stage, e)
 
                 err_msg = result.error.message if (not result.ok and result.error) else None
                 yield ToolResultEvent(

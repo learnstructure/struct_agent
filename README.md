@@ -318,16 +318,26 @@ Provides a human- and LLM-readable summary of project status, geometry counts, a
 - **Returns (`data`):** `{"title": str, "units": dict, "model": dict, "load_cases": list, "analysis_cases": list, "design_cases": list, ...}`
 
 #### `modify_project`
-Applies an arbitrary callback mutator function safely to a `Project`, validating that the model remains well-formed.
-- **Signature:** `modify_project(project, mutator) -> ToolResult`
+Applies declarative model modifications (updating rectangular, circular, or general section dimensions, member reassignments, material properties) or an optional programmatic callback mutator function safely to a `Project`.
+- **Signature:** `modify_project(project, mutator=None, *, sections=None, member_assignments=None, materials=None) -> ToolResult`
+- **Examples:**
+  - Rectangular section: `modify_project(project, sections=[{"id": "Col_350x350", "b": 0.45, "h": 0.45}])`
+  - Circular section: `modify_project(project, sections=[{"id": "Pier_D500", "d": 0.60}])`
+  - General section: `modify_project(project, sections=[{"id": "W14x90", "type": "general", "A": 0.0171, "I3": 0.000416}])`
+  - Member reassignment: `modify_project(project, member_assignments=[{"element_ids": ["C1", "C2"], "section_id": "Col_450x450"}])`
 
 #### `set_project_units`
-Explicitly defines or overrides unit system metadata on `project.metadata.units`.
+Explicitly defines or converts project units across all entities via `struct_core.units`.
 - **Signature:**
   ```python
-  set_project_units(project, *, length=None, force=None, mass=None, temperature=None, time="s", name=None) -> ToolResult
+  set_project_units(project, units: str, convert_existing: bool = True) -> ToolResult
   ```
-- **Example:** `set_project_units(project, length="in", force="kip", mass="kip*s^2/in", name="us_customary")`
+- **Example:**
+  ```python
+  set_project_units(project, units="kip, in", convert_existing=True)
+  # or:
+  set_project_units(project, units="kN, m")
+  ```
 
 #### `save_project` & `load_project`
 Full JSON serialization and deserialization round-trip for `struct_core.Project` containers.
@@ -400,11 +410,11 @@ Applies ASCE 7 / IBC occupancy-based live loads (e.g. `"office"`, `"residential"
 Computes the exact volumetric weight of all frame elements ($w = -\rho \cdot A \cdot g$) using material densities and section cross-sectional areas, and materializes continuous downward line loads directly into the target load case in the `Project` schema. (Note: `run_analysis` automatically computes and applies self-weight on the fly for any cases with `include_self_weight=True` without needing to mutate the project model; use `apply_self_weight` when you want to permanently bake element line loads into the schema).
 - **Signature:**
   ```python
-  apply_self_weight(project, *, target_case_id=None, unit_system=None, direction=None) -> ToolResult
+  apply_self_weight(project, *, target_case_id=None, units=None, direction=None) -> ToolResult
   ```
 - **Parameters:**
   - `target_case_id`: Load case name to append loads to (defaults to `"DEAD"` or `"SelfWeight"`).
-  - `unit_system`: `"si"`, `"us"`, or auto-detected from project metadata.
+  - `units`: Units specification (e.g. `"kN, m"`, `"kip, in"`), or auto-detected from project metadata.
   - `direction`: Gravity axis (`"z"` or `"-z"` for 3D, `"y"` or `"-y"` for 2D).
 - **Returns (`data`):** `{"project": Project, "target_case_id": str, "elements_loaded": int, "total_downward_load": float, "unit": str}`
 
@@ -709,7 +719,7 @@ from struct_agent.vision import (
 # 1. Structured floor plan draft (produced by VLM or defined programmatically)
 draft = FloorPlanDraft(
     title="2-Story Commercial Office",
-    unit_system="si",
+    units="kN, m",
     grid_lines_x=[
         GridLineDraft(id="A", coordinate=0.0),
         GridLineDraft(id="B", coordinate=6.0),

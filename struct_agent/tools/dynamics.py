@@ -102,12 +102,11 @@ def run_time_history(
     if scale_factor is not None:
         sf = float(scale_factor)
     else:
-        length_unit = getattr(getattr(getattr(project, "metadata", None), "units", None), "length", "m")
-        length_str = str(length_unit).lower()
-        if "in" in length_str:
-            sf = 386.09
-        elif "ft" in length_str:
-            sf = 32.174
+        u = getattr(project, "units", None) or getattr(getattr(project, "metadata", None), "units", None)
+        if u is not None:
+            from struct_core.units import parse_units
+            parsed_u = parse_units(u) if isinstance(u, (str, dict)) else u
+            sf = parsed_u.gravity_acceleration
         else:
             sf = 9.80665  # SI m/s^2
 
@@ -157,6 +156,23 @@ def run_time_history(
         )
 
     # 2. Resolve Solver & Build Structure
+    # Auto-construct effective seismic mass source (1.0D + 0.25L) if gravity cases exist and no mass source defined
+    if getattr(project.model, "mass_source", None) is None:
+        dead_cases = [lc.id for lc in getattr(project.model, "load_cases", []) if any(w in str(lc.id).lower() for w in ("dead", "sw", "gravity"))]
+        live_cases = [lc.id for lc in getattr(project.model, "load_cases", []) if "live" in str(lc.id).lower()]
+        if dead_cases or live_cases:
+            from struct_core import MassSource, MassSourceFactor
+            factors = [MassSourceFactor(load_case_id=c, factor=1.0) for c in dead_cases]
+            factors += [MassSourceFactor(load_case_id=c, factor=0.25) for c in live_cases]
+            project.model.mass_source = MassSource(
+                id="Auto_Seismic_Mass",
+                name="Auto-generated Seismic Mass Source (1.0D + 0.25L)",
+                include_element_mass=True,
+                include_added_mass=True,
+                lateral_only=False,
+                factors=factors,
+            )
+
     resolved_solver = solver.lower().strip()
     if resolved_solver == "auto":
         resolved_solver = _detect_solver(project)
@@ -385,6 +401,7 @@ def run_time_history(
     project.analysis_results[analysis_case_id] = analysis_result
     if "dynamic_envelope" not in project.analysis_results:
         project.analysis_results["dynamic_envelope"] = analysis_result
+    project.active_analysis_case = analysis_case_id
 
     validation = validate_analysis(analysis_result)
     if not validation.ok:
@@ -505,18 +522,11 @@ def run_response_spectrum(
     if scale_factor is not None:
         sf = float(scale_factor)
     else:
-        unit_len = "m"
-        if getattr(project, "metadata", None) and getattr(project.metadata, "units", None):
-            unit_len = str(getattr(project.metadata.units, "length", "m")).lower()
-        elif getattr(project, "units", None):
-            unit_len = str(getattr(project.units, "length", "m")).lower()
-
-        if unit_len in ("in", "inch", "inches"):
-            sf = 386.09
-        elif unit_len in ("ft", "foot", "feet"):
-            sf = 32.174
-        elif unit_len in ("mm", "millimeter"):
-            sf = 9806.65
+        u = getattr(project, "units", None) or getattr(getattr(project, "metadata", None), "units", None)
+        if u is not None:
+            from struct_core.units import parse_units
+            parsed_u = parse_units(u) if isinstance(u, (str, dict)) else u
+            sf = parsed_u.gravity_acceleration
         else:
             sf = 9.80665  # SI m/s^2
 
@@ -562,6 +572,23 @@ def run_response_spectrum(
                 )
 
     # 3. Resolve solver and build structure
+    # Auto-construct effective seismic mass source (1.0D + 0.25L) if gravity cases exist and no mass source defined
+    if getattr(project.model, "mass_source", None) is None:
+        dead_cases = [lc.id for lc in getattr(project.model, "load_cases", []) if any(w in str(lc.id).lower() for w in ("dead", "sw", "gravity"))]
+        live_cases = [lc.id for lc in getattr(project.model, "load_cases", []) if "live" in str(lc.id).lower()]
+        if dead_cases or live_cases:
+            from struct_core import MassSource, MassSourceFactor
+            factors = [MassSourceFactor(load_case_id=c, factor=1.0) for c in dead_cases]
+            factors += [MassSourceFactor(load_case_id=c, factor=0.25) for c in live_cases]
+            project.model.mass_source = MassSource(
+                id="Auto_Seismic_Mass",
+                name="Auto-generated Seismic Mass Source (1.0D + 0.25L)",
+                include_element_mass=True,
+                include_added_mass=True,
+                lateral_only=False,
+                factors=factors,
+            )
+
     resolved_solver = solver.lower().strip()
     if resolved_solver == "auto":
         resolved_solver = _detect_solver(project)
@@ -749,6 +776,7 @@ def run_response_spectrum(
     project.analysis_results[analysis_case_id] = analysis_result
     if envelope_to_design:
         project.analysis_results["dynamic_envelope"] = analysis_result
+    project.active_analysis_case = analysis_case_id
 
     validation = validate_analysis(analysis_result)
     if not validation.ok:

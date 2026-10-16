@@ -57,7 +57,7 @@ def test_build_multimodal_message_with_attachment(sample_png: Path):
 def test_create_model_from_plan_draft_direct():
     draft_dict = {
         "title": "3-Story RC Office",
-        "unit_system": "metric",
+        "units": "kN, m",
         "x_grids": [
             {"name": "1", "coordinate": 0.0},
             {"name": "2", "coordinate": 6.0},

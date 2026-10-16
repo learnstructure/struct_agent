@@ -195,3 +195,35 @@ def test_runner_reset():
     assert len(runner.messages) == 1
     assert runner.messages[0]["role"] == "system"
     assert runner.project is None
+
+
+def test_apply_self_weight_project_injection(tmp_path):
+    turn_1 = LLMResponse(
+        content="Create frame model",
+        tool_calls=[
+            ToolCallRequest(
+                id="call_1",
+                name="create_frame_model",
+                arguments={"num_bays": 1, "bay_width": 4.0, "num_stories": 1, "story_height": 3.0},
+            )
+        ],
+    )
+    turn_2 = LLMResponse(
+        content="Apply self weight",
+        tool_calls=[
+            ToolCallRequest(
+                id="call_2",
+                name="apply_self_weight",
+                arguments={},
+            )
+        ],
+    )
+    mock_provider = MockLLMProvider([turn_1, turn_2])
+    runner = AgentRunner(provider=mock_provider, max_turns=3)
+    events = list(runner.run_stream("Create frame and apply self weight"))
+    tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(tool_results) == 2
+    assert tool_results[0].ok is True
+    assert tool_results[1].ok is True
+    assert tool_results[1].tool_name == "apply_self_weight"
+

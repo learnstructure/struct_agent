@@ -11,7 +11,13 @@ repo_root = Path(__file__).resolve().parent.parent.parent
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
-from struct_link.examples.run_full_building_pipeline import run_pipeline
+import importlib.util
+
+_pipeline_path = repo_root / "struct_link" / "examples" / "run_full_building_pipeline.py"
+_spec = importlib.util.spec_from_file_location("full_building_pipeline_module", _pipeline_path)
+_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_mod)
+run_pipeline = _mod.run_pipeline
 
 
 def test_flagship_full_building_pipeline(tmp_path: Path):

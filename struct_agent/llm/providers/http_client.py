@@ -27,12 +27,14 @@ class NativeHTTPProvider(BaseLLMProvider):
         model: str = "gpt-4o",
         api_key: Optional[str] = None,
         api_base: Optional[str] = None,
-        timeout: float = 60.0,
+        timeout: Optional[float] = None,
     ):
         key = api_key or os.environ.get("OPENAI_API_KEY") or os.environ.get("LLM_API_KEY", "")
         base = api_base or os.environ.get("OPENAI_API_BASE") or os.environ.get("LLM_API_BASE", self.DEFAULT_API_BASE)
         super().__init__(model=model, api_key=key, api_base=base.rstrip("/"))
-        self.timeout = timeout
+        env_timeout_str = os.environ.get("LLM_TIMEOUT") or os.environ.get("OLLAMA_TIMEOUT")
+        default_timeout = float(env_timeout_str) if env_timeout_str else 300.0
+        self.timeout = timeout if timeout is not None else default_timeout
 
     def _prepare_payload(
         self,

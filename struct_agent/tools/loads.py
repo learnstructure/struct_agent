@@ -19,7 +19,7 @@ def apply_gravity_loads(
     superimposed_dead: float = 1.5,
     include_self_weight: bool = True,
     custom_live_load: Optional[float] = None,
-    unit_system: Optional[str] = None,
+    units: Optional[Union[str, Any, dict]] = None,
 ) -> ToolResult:
     """
     Apply code-compliant Dead and Live gravity loads to a Project's structural model.
@@ -39,8 +39,8 @@ def apply_gravity_loads(
         Whether to calculate element self-weight from sections and density.
     custom_live_load : float, optional
         Custom live load pressure override.
-    unit_system : str, optional
-        'si' or 'us'. If None, auto-inferred from project metadata.
+    units : str, Units, or dict, optional
+        Active units specification. If None, auto-inferred from project metadata.
 
     Returns
     -------
@@ -69,7 +69,7 @@ def apply_gravity_loads(
         )
 
     try:
-        generator = LoadGenerator(unit_system=unit_system)
+        generator = LoadGenerator(units=units)
         dead_case, live_case = generator.apply_gravity_loads(
             project,
             occupancy=occupancy,
@@ -113,7 +113,7 @@ def apply_lateral_loads(
     exposure_category: str = "B",
     tributary_width: float = 5.0,
     direction: str = "both",
-    unit_system: Optional[str] = None,
+    units: Optional[Union[str, Any, dict]] = None,
 ) -> ToolResult:
     """
     Calculate and apply ASCE 7 seismic (ELF) and/or wind (MWFRS) lateral forces to the structural model.
@@ -140,7 +140,7 @@ def apply_lateral_loads(
         )
 
     results_data = {}
-    generator = LoadGenerator(unit_system=unit_system)
+    generator = LoadGenerator(units=units)
 
     try:
         # Apply seismic if SDS provided
@@ -202,7 +202,7 @@ def apply_roof_loads(
     exposure_factor_ce: float = 1.0,
     thermal_factor_ct: float = 1.0,
     importance_factor: float = 1.0,
-    unit_system: Optional[str] = None,
+    units: Optional[Union[str, Any, dict]] = None,
 ) -> ToolResult:
     """
     Calculate and apply ASCE 7 Snow and/or Roof Live loads to roof framing beams.
@@ -228,7 +228,7 @@ def apply_roof_loads(
         )
 
     try:
-        generator = LoadGenerator(unit_system=unit_system)
+        generator = LoadGenerator(units=units)
         created = generator.apply_roof_loads(
             project,
             ground_snow_load=ground_snow_load,
@@ -320,7 +320,7 @@ def generate_load_combinations(
     project: Any,
     *,
     standard: str = "ACI318_LRFD",
-    unit_system: Optional[str] = None,
+    units: Optional[Union[str, Any, dict]] = None,
     orthogonal_seismic: bool = True,
 ) -> ToolResult:
     """
@@ -347,7 +347,7 @@ def generate_load_combinations(
         )
 
     method = "LRFD" if "LRFD" in standard.upper() else "ASD"
-    generator = LoadGenerator(unit_system=unit_system)
+    generator = LoadGenerator(units=units)
     combs = generator.generate_combinations(
         project,
         design_method=method,
@@ -370,7 +370,7 @@ def apply_self_weight(
     project: Any,
     *,
     target_case_id: Optional[str] = None,
-    unit_system: Optional[str] = None,
+    units: Optional[Union[str, Any, dict]] = None,
     direction: Optional[str] = None,
 ) -> ToolResult:
     """
@@ -400,7 +400,7 @@ def apply_self_weight(
         run_apply_self_weight(
             project,
             target_case_id=target_case_id,
-            unit_system=unit_system,
+            units=units,
             direction=direction,
         )
     except Exception as exc:

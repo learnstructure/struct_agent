@@ -28,6 +28,7 @@ ENGINEERING_TOOL_SCHEMAS: List[Dict[str, Any]] = [
                     "col_h": {"type": "number", "description": "Column cross-section depth in meters (default: 0.4)", "default": 0.4},
                     "beam_b": {"type": "number", "description": "Beam cross-section width in meters (default: 0.3)", "default": 0.3},
                     "beam_h": {"type": "number", "description": "Beam cross-section depth in meters (default: 0.5)", "default": 0.5},
+                    "units": {"type": "string", "description": "Canonical engineering unit pair, e.g. 'kN, m' or 'kip, in' (default: 'kN, m')", "default": "kN, m"},
                 },
                 "required": ["num_bays", "bay_width", "num_stories", "story_height"],
             },
@@ -42,7 +43,7 @@ ENGINEERING_TOOL_SCHEMAS: List[Dict[str, Any]] = [
                 "type": "object",
                 "properties": {
                     "title": {"type": "string", "description": "Project title (e.g. 'Office Building Structural Frame')"},
-                    "unit_system": {"type": "string", "enum": ["metric", "us_customary"], "description": "Unit system (metric=meters/kN, us_customary=feet/inches/kips)", "default": "metric"},
+                    "units": {"type": "string", "description": "Unit system specification, e.g. 'kN, m' or 'kip, in' (default: 'kN, m')", "default": "kN, m"},
                     "x_grids": {
                         "type": "array",
                         "description": "Grid lines along X axis (e.g. A, B, C or 1, 2, 3) with exact dimension coordinates",
@@ -74,7 +75,7 @@ ENGINEERING_TOOL_SCHEMAS: List[Dict[str, Any]] = [
                             "type": "object",
                             "properties": {
                                 "name": {"type": "string", "description": "Story name (e.g. 'Story 1', 'Roof')"},
-                                "height": {"type": "number", "description": "Story height (in meters or feet depending on unit_system)"},
+                                "height": {"type": "number", "description": "Story height (in meters or feet depending on units)"},
                             },
                             "required": ["name", "height"],
                         },
@@ -129,6 +130,7 @@ ENGINEERING_TOOL_SCHEMAS: List[Dict[str, Any]] = [
                 "properties": {
                     "title": {"type": "string", "description": "Project title (e.g. '2-Story RC Office Frame')"},
                     "author": {"type": "string", "description": "Engineer or author name"},
+                    "units": {"type": "string", "description": "Canonical engineering unit pair, e.g. 'kN, m' or 'kip, in' (default: 'kN, m')", "default": "kN, m"},
                     "model": {
                         "type": "object",
                         "description": "Structured structural model specification with nodes, elements, materials, sections, and supports.",
@@ -246,6 +248,80 @@ ENGINEERING_TOOL_SCHEMAS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "set_project_units",
+            "description": "Set or convert the project unit system (e.g. 'kN, m' or 'kip, in'). Automatically converts coordinates, loads, sections, materials, and results if convert_existing is True.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "units": {"type": "string", "description": "Target canonical unit pair, e.g. 'kN, m' or 'kip, in'"},
+                    "convert_existing": {"type": "boolean", "description": "Whether to convert existing numeric coordinates, loads, and properties (default: True)", "default": True},
+                },
+                "required": ["units"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "modify_project",
+            "description": "Modify the active structural model: update or enlarge cross-sections (rectangular, circular, or general shapes) for iterative reflection and member optimization loops, reassign members to different sections, or update materials.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sections": {
+                        "type": "array",
+                        "description": "Cross-sections to update or create (supports rectangular, circular, or general profiles)",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string", "description": "Section identifier (e.g. 'Col_350x350', 'Col_D500', 'W14x90')"},
+                                "type": {"type": "string", "enum": ["rectangular", "circular", "general"], "description": "Optional section shape type (default: inferred from provided dimensions)"},
+                                "b": {"type": "number", "description": "Width in meters (for rectangular sections, e.g. 0.45)"},
+                                "h": {"type": "number", "description": "Depth/height in meters (for rectangular sections, e.g. 0.55)"},
+                                "d": {"type": "number", "description": "Diameter in meters (for circular sections, e.g. 0.50 for 500 mm)"},
+                                "A": {"type": "number", "description": "Cross-sectional area in m^2 (for general sections)"},
+                                "I3": {"type": "number", "description": "Major axis second moment of area in m^4 (for general sections, alias: Iz)"},
+                                "I2": {"type": "number", "description": "Minor axis second moment of area in m^4 (for general sections, alias: Iy)"},
+                                "J": {"type": "number", "description": "Torsional constant in m^4 (for general sections)"},
+                            },
+                            "required": ["id"],
+                        },
+                    },
+                    "member_assignments": {
+                        "type": "array",
+                        "description": "Optional member reassignments to different section profiles",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "element_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "List of element IDs (e.g. ['C1', 'C2'])",
+                                },
+                                "section_id": {"type": "string", "description": "Target cross-section ID to assign"},
+                            },
+                            "required": ["element_ids", "section_id"],
+                        },
+                    },
+                    "materials": {
+                        "type": "array",
+                        "description": "Optional materials to update or add",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string", "description": "Material identifier (e.g. 'Concrete_5ksi')"},
+                                "fc_kpa": {"type": "number", "description": "Concrete compressive strength f'c in kPa (e.g. 34475 for 5000 psi)"},
+                            },
+                            "required": ["id"],
+                        },
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "preliminary_sizing",
             "description": "Automatically calculate heuristic member sizes (e.g. beam depth h = span/12, column size) based on spans and concrete compressive strength.",
             "parameters": {
@@ -287,7 +363,7 @@ ENGINEERING_TOOL_SCHEMAS: List[Dict[str, Any]] = [
                 "type": "object",
                 "properties": {
                     "target_case_id": {"type": "string", "description": "Optional specific load case ID to receive self-weight if no case currently has include_self_weight=True (default: 'DEAD')"},
-                    "unit_system": {"type": "string", "enum": ["si", "us"], "description": "Optional unit system override ('si' or 'us')"},
+                    "units": {"type": "string", "description": "Optional units override (e.g. 'kN, m', 'kip, in', 'si', 'us')"},
                     "direction": {"type": "string", "enum": ["-z", "-y"], "description": "Optional gravity direction ('-z' for 3D frames, '-y' for 2D plane frames)"},
                 },
             },

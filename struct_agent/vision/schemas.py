@@ -191,13 +191,7 @@ def normalize_floor_plan_dict(raw: dict) -> FloorPlanDraft:
     if sup not in ("Fixed", "Pinned"):
         sup = "Fixed"
 
-    units = raw.get("units")
-    if not units:
-        sys_u = str(raw.get("unit_system", "")).lower()
-        if "customary" in sys_u or "imperial" in sys_u or "us" in sys_u:
-            units = "kips, in, sec"
-        else:
-            units = "kN, m, s, C"
+    units = raw.get("units") or "kN, m"
 
     return FloorPlanDraft(
         title=str(raw.get("title") or "Architectural Plan Model"),

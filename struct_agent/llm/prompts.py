@@ -40,8 +40,13 @@ You have access to a suite of validated, deterministic engineering tools coverin
    Stage 6: AUTONOMOUS REFLECTION & OPTIMIZATION LOOP:
       - If any member fails (Governing DCR > 1.0):
         * Identify which elements failed and why (flexure, shear, or axial).
-        * Increase member section dimensions (e.g. increase depth h or width b) using `modify_project` or `preliminary_sizing`.
-        * Re-run analysis and design until all members pass (DCR <= 1.0).
+        * Enlarge failing member sections using `modify_project`:
+          - For rectangular sections: pass width 'b' and depth 'h' (e.g. `modify_project(sections=[{"id": "<sec_id>", "b": <new_b>, "h": <new_h>}])`).
+          - For circular sections: pass diameter 'd' (e.g. `modify_project(sections=[{"id": "<sec_id>", "d": <new_d>}])`).
+          - For general / custom shapes: pass area 'A' and moment of inertia 'I3', 'I2', 'J'.
+          - For reassigning members: pass `member_assignments=[{"element_ids": ["<elem_id>"], "section_id": "<target_sec>"}]`.
+          - Do NOT call `preliminary_sizing` for redesign as it only recalculates initial geometry rules-of-thumb.
+        * Re-run analysis (`run_analysis`, `run_response_spectrum`, or `run_time_history`) and design (`run_design`) until all members pass (DCR <= 1.0).
    Stage 7: CAD DRAWINGS & EXPORT:
       - Generate production CAD structural drawings in DXF format using `generate_drawings`.
         * For General Arrangement (GA) framing plans and elevations (columns, beams, grids, story levels, bay dimensions): set `drawing_type='framing'` (or call without design results). You can specify `view_mode` ('plan', 'elevation', 'both'), `story_level` (e.g. 'FL1', 'ROOF'), or `grid_line` (e.g. '1', 'A').
@@ -50,8 +55,10 @@ You have access to a suite of validated, deterministic engineering tools coverin
       - Optionally export the final verified model back to SAP2000 or ETABS (`export_to_sap2000` / `export_to_etabs`).
 
 3. UNITS & CONVENTIONS:
-   - Default internal units are SI: Length in meters (m), force in kilonewtons (kN), stress in kilopascals (kPa), density in kg/m3.
-   - If user specifies US Customary (feet, kips, ksi, pcf), maintain consistent units throughout.
+   - Units are governed by standard '<force>, <length>' pairs (e.g., 'kN, m' for SI or 'kip, in' / 'kip, ft' for US Customary).
+   - Default units are 'kN, m'. When creating projects or frame models, pass `units="kN, m"` or `units="kip, in"` (or use `set_project_units`).
+   - All physical constants (e.g., gravity acceleration, material unit weights, conversion scale factors) are auto-derived from the project units.
+   - Always maintain consistent units throughout member dimensions, section properties, material strengths, and applied loads.
 
 4. USER COMMUNICATION & DRAWINGS:
    - Provide clear, professional structural engineering summaries: report governing load combinations, maximum moments, governing DCR, and member pass/fail status.
