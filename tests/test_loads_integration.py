@@ -188,3 +188,34 @@ def test_define_mass_source_tool():
     assert res.data["total_mass"] > 0.0
     assert len(res.data["story_masses"]) > 0
     assert project.model.mass_source is not None
+
+
+def test_apply_lateral_loads_with_params_and_mass_source():
+    from struct_load import SeismicParameters
+    project = _build_3d_frame()
+    preliminary_sizing(project)
+    apply_gravity_loads(project, occupancy="office")
+
+    params = SeismicParameters(
+        sds=1.00,
+        sd1=0.40,
+        s1=0.35,
+        tl=8.0,
+        r_factor=8.0,
+        importance_factor=1.0,
+        system_type="rc_smf",
+        site_class="D",
+        risk_category="I",
+        method=2,
+    )
+
+    lat_res = apply_lateral_loads(
+        project,
+        params=params,
+        direction="X",
+        distribution="face",
+    )
+    assert lat_res.ok is True
+    assert "seismic_base_shear" in lat_res.data
+    assert lat_res.data["seismic_base_shear"] > 0.0
+

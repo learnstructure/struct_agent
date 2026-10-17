@@ -45,6 +45,8 @@ def run_time_history(
     n_modes_damping: int = 3,
     method: str = "newmark_beta",
     solver: str = "auto",
+    mass_source: Optional[Any] = None,
+    include_shear_deformation: bool = False,
     envelope_to_design: bool = True,
 ) -> ToolResult:
     """
@@ -157,7 +159,7 @@ def run_time_history(
 
     # 2. Resolve Solver & Build Structure
     # Auto-construct effective seismic mass source (1.0D + 0.25L) if gravity cases exist and no mass source defined
-    if getattr(project.model, "mass_source", None) is None:
+    if mass_source is None and getattr(project.model, "mass_source", None) is None:
         dead_cases = [lc.id for lc in getattr(project.model, "load_cases", []) if any(w in str(lc.id).lower() for w in ("dead", "sw", "gravity"))]
         live_cases = [lc.id for lc in getattr(project.model, "load_cases", []) if "live" in str(lc.id).lower()]
         if dead_cases or live_cases:
@@ -180,10 +182,18 @@ def run_time_history(
     try:
         if resolved_solver == "fem2d":
             from fem2d.adapters import model_from_core as fem2d_model_from_core
-            structure = fem2d_model_from_core(project)
+            structure = fem2d_model_from_core(
+                project,
+                include_shear_deformation=include_shear_deformation,
+                mass_source=mass_source,
+            )
         else:
             from fem3d.adapters import model_from_core as fem3d_model_from_core
-            structure = fem3d_model_from_core(project)
+            structure = fem3d_model_from_core(
+                project,
+                include_shear_deformation=include_shear_deformation,
+                mass_source=mass_source,
+            )
     except Exception as exc:
         return ToolResult.failure(
             "run_time_history",
@@ -442,9 +452,11 @@ def run_response_spectrum(
     project: Any,
     *,
     analysis_case_id: str,
+    params: Optional[Any] = None,
     sds: Optional[float] = None,
     sd1: Optional[float] = None,
     tl: float = 8.0,
+    site_class: str = "D",
     spectrum_curve: Optional[Any] = None,
     ground_motion: Any = None,
     component: Optional[str] = None,
@@ -456,6 +468,8 @@ def run_response_spectrum(
     damping_ratio: float = 0.05,
     scale_factor: Optional[float] = None,
     solver: str = "auto",
+    mass_source: Optional[Any] = None,
+    include_shear_deformation: bool = False,
     envelope_to_design: bool = True,
 ) -> ToolResult:
     """
@@ -573,7 +587,7 @@ def run_response_spectrum(
 
     # 3. Resolve solver and build structure
     # Auto-construct effective seismic mass source (1.0D + 0.25L) if gravity cases exist and no mass source defined
-    if getattr(project.model, "mass_source", None) is None:
+    if mass_source is None and getattr(project.model, "mass_source", None) is None:
         dead_cases = [lc.id for lc in getattr(project.model, "load_cases", []) if any(w in str(lc.id).lower() for w in ("dead", "sw", "gravity"))]
         live_cases = [lc.id for lc in getattr(project.model, "load_cases", []) if "live" in str(lc.id).lower()]
         if dead_cases or live_cases:
@@ -597,11 +611,19 @@ def run_response_spectrum(
         if resolved_solver == "fem2d":
             from fem2d.adapters import model_from_core as fem2d_model_from_core
 
-            structure = fem2d_model_from_core(project)
+            structure = fem2d_model_from_core(
+                project,
+                include_shear_deformation=include_shear_deformation,
+                mass_source=mass_source,
+            )
         else:
             from fem3d.adapters import model_from_core as fem3d_model_from_core
 
-            structure = fem3d_model_from_core(project)
+            structure = fem3d_model_from_core(
+                project,
+                include_shear_deformation=include_shear_deformation,
+                mass_source=mass_source,
+            )
     except Exception as exc:
         return ToolResult.failure(
             "run_response_spectrum",
@@ -634,11 +656,20 @@ def run_response_spectrum(
 
     # 4. Execute Response Spectrum Analysis
     try:
+        rsa_params = params
+        if rsa_params is None and sds is not None and sd1 is not None:
+            from struct_load import SeismicParameters
+            rsa_params = SeismicParameters(
+                sds=float(sds),
+                sd1=float(sd1),
+                tl=float(tl) if tl is not None else 8.0,
+                site_class=site_class,
+                damping_ratio=float(damping_ratio) if damping_ratio is not None else 0.05,
+            )
+
         rsa_res = structure.response_spectrum_analysis(
+            params=rsa_params,
             spectrum_curve=spectrum_curve,
-            sds=sds,
-            sd1=sd1,
-            tl=tl,
             gm=resolved_gm,
             Sa=Sa,
             Sd=Sd,

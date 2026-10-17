@@ -105,10 +105,19 @@ def apply_lateral_loads(
     project: Any,
     *,
     code: str = "ASCE7-22",
+    params: Optional[Any] = None,
     sds: Optional[float] = 0.75,
     sd1: Optional[float] = 0.40,
+    s1: Optional[float] = None,
+    tl: Optional[float] = 8.0,
     r_factor: float = 8.0,
+    importance_factor: float = 1.0,
     system_type: str = "rc_smf",
+    site_class: str = "D",
+    risk_category: str = "I",
+    method: Union[int, str] = 1,
+    mass_source: Optional[Any] = None,
+    distribution: str = "face",
     wind_speed: Optional[float] = None,
     exposure_category: str = "B",
     tributary_width: float = 5.0,
@@ -129,7 +138,7 @@ def apply_lateral_loads(
         )
 
     try:
-        from struct_load import LoadGenerator
+        from struct_load import LoadGenerator, SeismicParameters
     except ImportError as exc:
         return ToolResult.failure(
             "apply_lateral_loads",
@@ -143,16 +152,28 @@ def apply_lateral_loads(
     generator = LoadGenerator(units=units)
 
     try:
-        # Apply seismic if SDS provided
-        if sds is not None and sd1 is not None:
+        # Apply seismic if params or (sds and sd1) provided
+        if params is not None or (sds is not None and sd1 is not None):
+            seismic_params = params
+            if seismic_params is None:
+                seismic_params = SeismicParameters(
+                    sds=sds,
+                    sd1=sd1,
+                    s1=s1,
+                    tl=tl if tl is not None else 8.0,
+                    r_factor=r_factor,
+                    importance_factor=importance_factor,
+                    system_type=system_type,
+                    site_class=site_class,
+                    risk_category=risk_category,
+                    method=method,
+                )
             eq_result, elf_res = generator.apply_lateral_seismic(
                 project,
-                sds=sds,
-                sd1=sd1,
-                r_factor=r_factor,
-                system_type=system_type,
-                tributary_width=tributary_width,
+                params=seismic_params,
                 direction=direction,
+                mass_source=mass_source,
+                distribution=distribution,
             )
             if isinstance(eq_result, list):
                 results_data["seismic_case_ids"] = [c.id for c in eq_result]

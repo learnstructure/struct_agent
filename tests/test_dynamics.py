@@ -402,3 +402,26 @@ def test_peer_earthquakes_integration():
     assert rsa_res.data["combined_base_shear"] > 0.0
 
 
+def test_run_response_spectrum_asce7_params():
+    """Verify run_response_spectrum using SeismicParameters and site_class."""
+    from struct_load import SeismicParameters
+    proj = _build_3d_frame_project()
+    params = SeismicParameters(
+        sds=1.00,
+        sd1=0.40,
+        tl=8.0,
+        site_class="D",
+        damping_ratio=0.05,
+    )
+    rsa_res = run_response_spectrum(
+        proj,
+        analysis_case_id="RSA_ASCE_Params",
+        params=params,
+        direction="x",
+        combination="CQC",
+    )
+    assert rsa_res.ok, f"RSA with params failed: {rsa_res.error}"
+    assert rsa_res.data["combined_base_shear"] > 0.0
+
+
+
