@@ -41,6 +41,7 @@ class NativeHTTPProvider(BaseLLMProvider):
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
         temperature: float = 0.0,
+        seed: Optional[int] = None,
         stream: bool = False,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -49,6 +50,12 @@ class NativeHTTPProvider(BaseLLMProvider):
             "temperature": temperature,
             "stream": stream,
         }
+        if seed is not None:
+            payload["seed"] = seed
+        if self.max_tokens:
+            payload["max_tokens"] = self.max_tokens
+        if self.reasoning_effort:
+            payload["reasoning_effort"] = self.reasoning_effort
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
@@ -59,9 +66,10 @@ class NativeHTTPProvider(BaseLLMProvider):
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
         temperature: float = 0.0,
+        seed: Optional[int] = None,
     ) -> LLMResponse:
         url = f"{self.api_base}/chat/completions"
-        payload = self._prepare_payload(messages, tools, temperature, stream=False)
+        payload = self._prepare_payload(messages, tools, temperature, seed=seed, stream=False)
         data = json.dumps(payload).encode("utf-8")
 
         headers = {
@@ -70,16 +78,41 @@ class NativeHTTPProvider(BaseLLMProvider):
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        max_retries = 5
+        base_delay = 5.0
+        res_body = None
 
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as response:
-                res_body = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            err_msg = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"LLM API request failed with status {exc.code}: {err_msg}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"Could not connect to LLM endpoint at {url}: {exc}") from exc
+        for attempt in range(max_retries + 1):
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as response:
+                    res_body = json.loads(response.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as exc:
+                err_msg = exc.read().decode("utf-8", errors="replace")
+                if exc.code in (429, 503) and attempt < max_retries:
+                    import time
+                    retry_wait = base_delay * (1.5 ** attempt)
+                    try:
+                        err_json = json.loads(err_msg)
+                        if isinstance(err_json, list) and len(err_json) > 0:
+                            err_json = err_json[0]
+                        details = err_json.get("error", {}).get("details", [])
+                        for d in details:
+                            if "retryDelay" in d:
+                                raw_delay = d["retryDelay"].rstrip("s")
+                                retry_wait = max(float(raw_delay) + 1.0, retry_wait)
+                    except Exception:
+                        pass
+                    time.sleep(retry_wait)
+                    continue
+                raise RuntimeError(f"LLM API request failed with status {exc.code}: {err_msg}") from exc
+            except urllib.error.URLError as exc:
+                if attempt < max_retries:
+                    import time
+                    time.sleep(base_delay)
+                    continue
+                raise RuntimeError(f"Could not connect to LLM endpoint at {url}: {exc}") from exc
 
         choice = res_body.get("choices", [{}])[0]
         message = choice.get("message", {})
@@ -107,6 +140,7 @@ class NativeHTTPProvider(BaseLLMProvider):
             finish_reason=choice.get("finish_reason", "stop"),
             raw_response=res_body,
             usage=usage,
+            reasoning=message.get("reasoning") or None,
         )
 
     def generate_stream(
@@ -114,12 +148,13 @@ class NativeHTTPProvider(BaseLLMProvider):
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
         temperature: float = 0.0,
+        seed: Optional[int] = None,
     ) -> Generator[LLMEvent, None, LLMResponse]:
         """
         Streaming implementation. For simplicity and robustness across mockable/non-mockable
         endpoints, this delegates to generate() and yields chunk events.
         """
-        resp = self.generate(messages, tools, temperature)
+        resp = self.generate(messages, tools, temperature, seed=seed)
         content = resp.content or ""
         if "<think>" in content and "</think>" in content:
             parts = content.split("</think>", 1)

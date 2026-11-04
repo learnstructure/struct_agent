@@ -46,21 +46,21 @@ def _create_3d_frame():
     ]
 
     sections = [
-        RectangularSection(id="COL", b=0.4, h=0.4),
-        RectangularSection(id="BEAM", b=0.3, h=0.5),
+        RectangularSection(id="COL", material_id="M1", b=0.4, h=0.4),
+        RectangularSection(id="BEAM", material_id="M1", b=0.3, h=0.5),
     ]
 
     elements = [
         # Columns
-        BeamElement(id="C1", start_node="N1", end_node="N5", material_id="M1", section_id="COL"),
-        BeamElement(id="C2", start_node="N2", end_node="N6", material_id="M1", section_id="COL"),
-        BeamElement(id="C3", start_node="N3", end_node="N7", material_id="M1", section_id="COL"),
-        BeamElement(id="C4", start_node="N4", end_node="N8", material_id="M1", section_id="COL"),
+        BeamElement(id="C1", start_node="N1", end_node="N5", section_id="COL"),
+        BeamElement(id="C2", start_node="N2", end_node="N6", section_id="COL"),
+        BeamElement(id="C3", start_node="N3", end_node="N7", section_id="COL"),
+        BeamElement(id="C4", start_node="N4", end_node="N8", section_id="COL"),
         # Beams
-        BeamElement(id="B1", start_node="N5", end_node="N6", material_id="M1", section_id="BEAM"),
-        BeamElement(id="B2", start_node="N7", end_node="N8", material_id="M1", section_id="BEAM"),
-        BeamElement(id="B3", start_node="N5", end_node="N7", material_id="M1", section_id="BEAM"),
-        BeamElement(id="B4", start_node="N6", end_node="N8", material_id="M1", section_id="BEAM"),
+        BeamElement(id="B1", start_node="N5", end_node="N6", section_id="BEAM"),
+        BeamElement(id="B2", start_node="N7", end_node="N8", section_id="BEAM"),
+        BeamElement(id="B3", start_node="N5", end_node="N7", section_id="BEAM"),
+        BeamElement(id="B4", start_node="N6", end_node="N8", section_id="BEAM"),
     ]
 
     load_cases = [
@@ -128,7 +128,8 @@ def test_fem3d_static_analysis_auto():
     inspect = inspect_analysis_results(project, "Static_3D")
     assert inspect.ok
     assert "C1" in inspect.data["elements"]
-    assert inspect.data["elements"]["C1"]["max_axial"] > 0.0
+    # Axial force is tension positive (as in fem2d): a gravity-loaded column is in compression
+    assert inspect.data["elements"]["C1"]["max_axial"] < 0.0
 
 
 def test_fem3d_modal_analysis():
@@ -152,3 +153,31 @@ def test_fem3d_combination_envelope():
     res = run_analysis(project, analysis_case_id="Envelope_3D", solver="fem3d", load_case_id="envelope")
     assert res.ok, f"Envelope failed: {res.error}"
     assert res.data["n_element_results"] == 8
+
+
+def test_create_frame_model_rectangular_3d():
+    from struct_agent.tools.model import create_frame_model
+    res = create_frame_model(
+        fc=27580.0,
+        bays_x=3,
+        bays_y=2,
+        bay_width_x=5.0,
+        bay_width_y=6.0,
+        num_stories=3,
+        story_height=3.2,
+        dimension="3d",
+    )
+    assert res.ok
+    proj = res.data["project"]
+    m = proj.model
+    # 3 bays in X -> 4 grid lines; 2 bays in Y -> 3 grid lines; 3 stories -> 4 elevations
+    # Nodes: 4 * 3 * 4 = 48 nodes
+    assert len(m.nodes) == 48
+    assert max(n.x for n in m.nodes) == 15.0
+    assert max(n.y for n in m.nodes) == 12.0
+    assert max(n.z for n in m.nodes) == pytest.approx(9.6)
+    # Columns: 4 * 3 * 3 = 36 columns
+    # Beams X: 3 * 3 * 3 = 27 beams
+    # Beams Y: 4 * 2 * 3 = 24 beams
+    # Total elements = 36 + 27 + 24 = 87
+    assert len(m.elements) == 87

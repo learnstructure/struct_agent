@@ -17,7 +17,8 @@ from struct_core import (
     AnalysisResult,
     BeamElement,
     DistributedLoad,
-    ElasticMaterial,
+    ConcreteMaterial,
+    RebarMaterial,
     LinearStaticAnalysis,
     LoadCase,
     Node,
@@ -60,17 +61,20 @@ def run_pipeline():
     ]
 
     # Materials
-    mat_conc = ElasticMaterial(id="Concrete_4ksi", E=24800000.0, rho=2400.0)  # kN/m^2
+    mat_conc = ConcreteMaterial(id="Concrete_4ksi", fc=27580.0, E=24800000.0, rho=2400.0)  # kPa (4 ksi)
+    mat_rebar = RebarMaterial(id="Grade60", fy=413700.0, E=199950000.0)  # kPa (60 ksi)
 
-    # Sections (Beam: 0.3m x 0.5m [12x20 in], Column: 0.4m x 0.4m [16x16 in])
-    sec_beam = RectangularSection(id="Beam_12x20", b=0.30, h=0.50)
-    sec_col = RectangularSection(id="Col_16x16", b=0.40, h=0.40)
+    # Sections (Beam: 0.3m x 0.5m [12x20 in], Column: 0.4m x 0.4m [16x16 in]) own their concrete, bars and cover
+    rc = dict(material_id="Concrete_4ksi", rebar_material_id="Grade60", transverse_rebar_material_id="Grade60",
+              cover=0.0381)  # 1.5 in clear cover
+    sec_beam = RectangularSection(id="Beam_12x20", b=0.30, h=0.50, **rc)
+    sec_col = RectangularSection(id="Col_16x16", b=0.40, h=0.40, **rc)
 
     # Elements: 1 (Left Col), 2 (Beam), 3 (Right Col)
     elements = [
-        BeamElement(id=1, start_node=1, end_node=2, material_id="Concrete_4ksi", section_id="Col_16x16"),
-        BeamElement(id=2, start_node=2, end_node=3, material_id="Concrete_4ksi", section_id="Beam_12x20"),
-        BeamElement(id=3, start_node=4, end_node=3, material_id="Concrete_4ksi", section_id="Col_16x16"),
+        BeamElement(id=1, start_node=1, end_node=2, section_id="Col_16x16"),
+        BeamElement(id=2, start_node=2, end_node=3, section_id="Beam_12x20"),
+        BeamElement(id=3, start_node=4, end_node=3, section_id="Col_16x16"),
     ]
 
     # Supports: Fixed at bases (nodes 1 and 4)
@@ -86,7 +90,7 @@ def run_pipeline():
 
     model = StructuralModel(
         nodes=nodes,
-        materials=[mat_conc],
+        materials=[mat_conc, mat_rebar],
         sections=[sec_beam, sec_col],
         elements=elements,
         supports=supports,
@@ -124,7 +128,20 @@ def run_pipeline():
     # -------------------------------------------------------------------------
     print("\n[3/5] Performing ACI 318 RC Design & Detailing via aci318...")
 
-    design_res, detail_res = design_from_core(project, design_code="ACI 318-19")
+    # Strength design for the factored gravity load (1.4D, ASCE 7-22 §2.3.1); the isolated footings are sized for the
+    # allowable soil bearing pressure under the service load D (ACI 318-25 R13.2.6.1)
+    from struct_core.analysis_result import superpose_results
+
+    factored = superpose_results({"Gravity": analysis_result}, {"Gravity": 1.4}, output_case_id="1.4D")
+    project.analysis_results["1.4D"] = factored
+    design_res, detail_res = design_from_core(
+        project,
+        analysis_result=factored,
+        design_code="ACI 318-19",
+        allowable_bearing_pressure=150.0,      # kPa
+        footing_cover=0.075,                   # m (3 in, cast against earth)
+        service_analysis_results=[analysis_result],
+    )
 
     project.design_results["ACI318_19"] = design_res
     project.detailing_results["ACI318_19"] = detail_res

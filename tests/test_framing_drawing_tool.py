@@ -12,6 +12,7 @@ from struct_agent.tools import create_frame_model, generate_drawings, generate_f
 def test_generate_drawings_framing_mode(tmp_path):
     """Verify generate_drawings with drawing_type='framing' generates valid DXF drawings."""
     res_model = create_frame_model(
+        fc=27580.0,
         num_bays=3,
         bay_width=6.0,
         num_stories=2,
@@ -64,7 +65,7 @@ def test_generate_drawings_framing_mode(tmp_path):
 
 def test_generate_drawings_auto_fallback_to_framing(tmp_path):
     """Verify generate_drawings in default auto mode without design results generates GA framing drawings."""
-    res_model = create_frame_model(num_bays=2, bay_width=5.0, num_stories=1, story_height=3.0)
+    res_model = create_frame_model(fc=27580.0, num_bays=2, bay_width=5.0, num_stories=1, story_height=3.0)
     project = res_model.data["project"]
 
     dxf_out = tmp_path / "fallback_frame.dxf"
@@ -78,7 +79,7 @@ def test_generate_drawings_auto_fallback_to_framing(tmp_path):
 
 def test_generate_framing_drawings_compatibility_wrapper(tmp_path):
     """Verify the backward-compatible Python wrapper generate_framing_drawings works."""
-    res_model = create_frame_model(num_bays=2, bay_width=4.0, num_stories=1, story_height=3.0)
+    res_model = create_frame_model(fc=27580.0, num_bays=2, bay_width=4.0, num_stories=1, story_height=3.0)
     project = res_model.data["project"]
 
     dxf_out = tmp_path / "wrapper_frame.dxf"
@@ -94,7 +95,7 @@ def test_agent_runner_unified_drawing_dispatch(tmp_path):
     runner = AgentRunner(provider="auto", model="test")
     res_model = runner._execute_tool(
         "create_frame_model",
-        {"num_bays": 2, "bay_width": 5.0, "num_stories": 2, "story_height": 3.0},
+        {"num_bays": 2, "bay_width": 5.0, "num_stories": 2, "story_height": 3.0, "fc": 27580.0},
     )
     runner.project = res_model.data["project"]
 
@@ -112,7 +113,7 @@ def test_agent_runner_unified_drawing_dispatch(tmp_path):
 
 def test_generate_drawings_auto_with_3d_both_elevations(tmp_path):
     """Verify generate_drawings in 3D auto mode generates framing plan and elevations in both directions."""
-    res_model = create_frame_model(num_bays=2, bay_width=6.0, num_stories=2, story_height=3.5, dimension="3d")
+    res_model = create_frame_model(fc=27580.0, num_bays=2, bay_width=6.0, num_stories=2, story_height=3.5, dimension="3d")
     project = res_model.data["project"]
 
     dxf_out = tmp_path / "auto_3d_composite.dxf"
@@ -129,11 +130,14 @@ def test_generate_drawings_auto_with_design_includes_framing_and_detailing(tmp_p
     import ezdxf
     from struct_agent.tools.analysis import run_analysis
     from struct_agent.tools.design import run_design
+    from struct_agent.tools.loads import apply_gravity_loads, generate_load_combinations
 
-    res_model = create_frame_model(num_bays=2, bay_width=6.0, num_stories=2, story_height=3.5, dimension="2d")
+    res_model = create_frame_model(fc=27580.0, num_bays=2, bay_width=6.0, num_stories=2, story_height=3.5, dimension="2d")
     project = res_model.data["project"]
 
-    # Run analysis and design
+    # Design the factored load combinations
+    assert apply_gravity_loads(project, occupancy="office", tributary_width=5.0, superimposed_dead=1.5).ok
+    assert generate_load_combinations(project).ok
     res_ana = run_analysis(project, analysis_case_id="case1", analysis_type="static")
     assert res_ana.status == "success"
 

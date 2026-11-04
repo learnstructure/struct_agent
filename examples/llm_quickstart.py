@@ -116,7 +116,8 @@ def main():
 
     initial_prompt = (
         f"Import the structural model from '{sample_s2k}', validate the geometry, "
-        f"run static analysis, design all concrete elements under ACI 318-19, "
+        f"run static analysis, design all concrete elements under ACI 318-19 (concrete f'c = 4,000 psi, "
+        f"Grade 60 reinforcement, allowable soil bearing pressure 3 ksf), "
         f"and export detailing drawings to '{output_dxf}'."
     )
 

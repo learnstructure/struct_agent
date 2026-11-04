@@ -5,6 +5,10 @@ Each tool is a small, explicit, strongly-typed function that wraps the
 underlying engineering libraries (struct_core, fem2d, aci318, struct_draw).
 Tools return structured :class:`ToolResult` objects and never invent
 engineering data.
+
+Internal modules (units_input, seismic_basis, model_state, materials, frame_stability)
+provide domain-specific physics engines, cryptographic state stamps, and input
+range checks invoked internally by tools; they are not directly exposed as agent actions.
 """
 
 from .base import ToolResult, AgentError
@@ -12,11 +16,11 @@ from .model import (
     create_project,
     create_frame_model,
     create_model_from_plan_draft,
-    build_structural_model,
     inspect_project,
     modify_project,
     set_project_units,
 )
+from ..validation.model import validate_model
 from .sizing import preliminary_sizing
 from .loads import (
     apply_gravity_loads,
@@ -44,10 +48,10 @@ __all__ = [
     "create_project",
     "create_frame_model",
     "create_model_from_plan_draft",
-    "build_structural_model",
     "inspect_project",
     "modify_project",
     "set_project_units",
+    "validate_model",
     "preliminary_sizing",
     "apply_gravity_loads",
     "apply_lateral_loads",

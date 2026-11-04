@@ -145,6 +145,7 @@ class CompleteEvent(LLMEvent):
     governing_dcr: Optional[float] = None
     passed: Optional[bool] = None
     project: Any = None
+    turn_limit_reached: bool = False
 
     def __init__(
         self,
@@ -153,6 +154,7 @@ class CompleteEvent(LLMEvent):
         governing_dcr: Optional[float] = None,
         passed: Optional[bool] = None,
         project: Any = None,
+        turn_limit_reached: bool = False,
     ):
         super().__init__(event_type=EventType.COMPLETE)
         self.final_message = final_message
@@ -160,3 +162,4 @@ class CompleteEvent(LLMEvent):
         self.governing_dcr = governing_dcr
         self.passed = passed
         self.project = project
+        self.turn_limit_reached = turn_limit_reached

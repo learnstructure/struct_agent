@@ -22,12 +22,13 @@ from typing import Any, Dict, Optional
 
 from struct_core import (
     BeamElement,
+    ConcreteMaterial,
     DistributedLoad,
-    ElasticMaterial,
     LinearStaticAnalysis,
     LoadCase,
     Node,
     Project,
+    RebarMaterial,
     RectangularSection,
     StructuralModel,
     Support,
@@ -192,14 +193,18 @@ class StructAgent:
             Node(id=4, x=6.0, y=0.0),
         ]
 
-        mat_conc = ElasticMaterial(id="Concrete_4ksi", E=24800000.0, rho=2400.0)
-        sec_beam = RectangularSection(id="Beam_12x20", b=0.30, h=0.50)
-        sec_col = RectangularSection(id="Col_16x16", b=0.40, h=0.40)
+        # 4,000 psi concrete, Grade 60 bars, 1.5 in (38 mm) clear cover
+        mat_conc = ConcreteMaterial(id="Concrete_4ksi", fc=27_579.0, E=24_800_000.0, rho=2400.0, unit_weight=23.56)
+        mat_rebar = RebarMaterial(id="Grade60", fy=413_685.0, fu=620_528.0, E=199_948_000.0, unit_weight=76.97)
+        rc = dict(material_id="Concrete_4ksi", rebar_material_id="Grade60", transverse_rebar_material_id="Grade60",
+                  cover=0.0381)
+        sec_beam = RectangularSection(id="Beam_12x20", b=0.30, h=0.50, **rc)
+        sec_col = RectangularSection(id="Col_16x16", b=0.40, h=0.40, **rc)
 
         elements = [
-            BeamElement(id=1, start_node=1, end_node=2, material_id="Concrete_4ksi", section_id="Col_16x16"),
-            BeamElement(id=2, start_node=2, end_node=3, material_id="Concrete_4ksi", section_id="Beam_12x20"),
-            BeamElement(id=3, start_node=4, end_node=3, material_id="Concrete_4ksi", section_id="Col_16x16"),
+            BeamElement(id=1, start_node=1, end_node=2, section_id="Col_16x16"),
+            BeamElement(id=2, start_node=2, end_node=3, section_id="Beam_12x20"),
+            BeamElement(id=3, start_node=4, end_node=3, section_id="Col_16x16"),
         ]
 
         supports = [Support.fixed(node_id=1), Support.fixed(node_id=4)]
@@ -211,7 +216,7 @@ class StructAgent:
 
         return StructuralModel(
             nodes=nodes,
-            materials=[mat_conc],
+            materials=[mat_conc, mat_rebar],
             sections=[sec_beam, sec_col],
             elements=elements,
             supports=supports,

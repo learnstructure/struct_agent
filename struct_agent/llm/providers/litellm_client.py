@@ -38,6 +38,7 @@ class LiteLLMProvider(BaseLLMProvider):
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
         temperature: float = 0.0,
+        seed: Optional[int] = None,
     ) -> LLMResponse:
         import litellm
 
@@ -46,6 +47,12 @@ class LiteLLMProvider(BaseLLMProvider):
             "messages": messages,
             "temperature": temperature,
         }
+        if seed is not None:
+            kwargs["seed"] = seed
+        if self.max_tokens:
+            kwargs["max_tokens"] = self.max_tokens
+        if self.reasoning_effort:
+            kwargs["reasoning_effort"] = self.reasoning_effort
         if self.api_key:
             kwargs["api_key"] = self.api_key
         if self.api_base:
@@ -96,8 +103,9 @@ class LiteLLMProvider(BaseLLMProvider):
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
         temperature: float = 0.0,
+        seed: Optional[int] = None,
     ) -> Generator[LLMEvent, None, LLMResponse]:
-        resp = self.generate(messages, tools, temperature)
+        resp = self.generate(messages, tools, temperature, seed=seed)
         if resp.content:
             yield TextChunkEvent(resp.content)
         return resp

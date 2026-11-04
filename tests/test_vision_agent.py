@@ -76,6 +76,7 @@ def test_create_model_from_plan_draft_direct():
         "default_col_h": 0.45,
         "default_beam_b": 0.3,
         "default_beam_h": 0.5,
+        "fc": 27580.0,
     }
 
     result = create_model_from_plan_draft(**draft_dict)
@@ -122,6 +123,7 @@ def test_runner_multimodal_plan_interpretation(sample_png: Path):
                     name="create_model_from_plan_draft",
                     arguments={
                         "title": "VLM Modeled Frame",
+                        "fc": 27580.0,
                         "x_grids": [
                             {"name": "1", "coordinate": 0.0},
                             {"name": "2", "coordinate": 6.0},

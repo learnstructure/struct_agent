@@ -76,7 +76,7 @@ struct_agent/
 |   +-- agent.py              # StructAgent orchestrator (deterministic, no LLM)
 |   +-- tools/
 |   |   +-- base.py           # ToolResult, AgentError
-|   |   +-- model.py          # create_project, create_frame_model, build_structural_model, create_model_from_plan_draft, inspect_project, modify_project, set_project_units, save_project, load_project
+|   |   +-- model.py          # create_project, create_frame_model, create_model_from_plan_draft, inspect_project, modify_project, set_project_units, save_project, load_project
 |   |   +-- loads.py          # apply_gravity_loads, apply_self_weight, apply_lateral_loads, generate_load_combinations
 |   |   +-- link.py           # import_from_sap2000, export_to_sap2000, import_from_etabs, export_to_etabs
 |   |   +-- sizing.py         # preliminary_sizing
@@ -186,7 +186,6 @@ from struct_agent import (
     AgentError,               # Structured error inside ToolResult
     create_project,           # Wrap a StructuralModel in a Project
     create_frame_model,       # Quick parametric frame generator
-    build_structural_model,   # Dictionary/schema-based model builder
     create_model_from_plan_draft, # Build 3D Project from VLM FloorPlanDraft
     inspect_project,          # Summary of project contents
     modify_project,           # Apply a mutator to the model
@@ -242,63 +241,65 @@ Every tool in `struct_agent` returns a deterministic [`ToolResult`](file:///c:/U
 ### 1. Model & Project Lifecycle Tools
 
 #### `create_project`
-Initializes a new `struct_core.Project` container wrapping an existing `StructuralModel`, dictionary, or creates an empty container.
+Initializes a new `struct_core.Project` container. Accepts an existing `StructuralModel`, creates an empty container, or constructs arbitrary/irregular structural geometry (trusses, braced frames, angled members, bridges) directly from structured JSON lists.
 - **Signature:**
   ```python
-  create_project(structural_model=None, *, title=None, author=None, model=None, nodes=None, elements=None, materials=None, sections=None, supports=None) -> ToolResult
+  create_project(structural_model=None, *, title=None, author=None, units="kN, m", dimension=None, model=None, nodes=None, elements=None, materials=None, sections=None, supports=None) -> ToolResult
   ```
 - **Parameters:**
   - `structural_model`: Optional existing `StructuralModel` instance or dictionary.
   - `title`: Project title metadata string.
   - `author`: Engineer / author name metadata string.
-  - `nodes`, `elements`, `materials`, `sections`, `supports`: Optional lists to build model geometry inline.
-- **Returns (`data`):** `{"project": Project, "title": str, "author": str, "n_nodes": int, "n_elements": int, "n_supports": int}`
-- **Example:**
+  - `units`: Canonical unit pair string (e.g. `'kN, m'` or `'kip, in'`).
+  - `dimension`: Model dimensionality (`'2D'` or `'3D'`).
+  - `nodes`, `elements`, `materials`, `sections`, `supports`: Optional lists (or dictionary passed via `model`) to build model geometry inline.
+- **Nothing is invented:** An element naming an undefined section or node, a section without its material, or a material without its properties (concrete f'c, elastic E) is refused with every problem listed, and the model is not created. Concrete materials and concrete sections take the documented defaults for what is not given (E from f'c, 150 pcf, Grade 60 bars `REBAR`, 1.5 in cover), listed in `defaults_applied`.
+- **Returns (`data`):** `{"project": Project, "title": str, "author": str, "n_nodes": int, "n_elements": int, "n_supports": int, "materials": list, "defaults_applied": list}`
+- **Example (Empty Container):**
   ```python
-  res = create_project(title="Office Tower Study", author="Structural Team")
+  res = create_project(title="Office Tower Study", author="Structural Team", units="kN, m")
+  project = res.data["project"]
+  ```
+- **Example (Custom Truss Geometry):**
+  ```python
+  res = create_project(
+      title="Roof Truss",
+      units="kN, m",
+      nodes=[{"id": 1, "x": 0, "y": 0}, {"id": 2, "x": 6, "y": 0}, {"id": 3, "x": 3, "y": 2.5}],
+      materials=[{"id": "STEEL", "E": 200e6}],
+      sections=[{"id": "ROD", "type": "general", "A": 0.002, "material_id": "STEEL"}],
+      elements=[{"id": "T1", "type": "truss", "start_node": 1, "end_node": 2, "section_id": "ROD"}],
+      supports=[{"node_id": 1, "fixity": "pinned"}, {"node_id": 2, "fixity": "pinned"}],
+  )
   project = res.data["project"]
   ```
 
 #### `create_frame_model`
-High-level parametric generator for regular orthogonal 2D plane frames or 3D space frames. Automatically provisions grid nodes, column/beam connectivity, standard concrete materials, rectangular sections, and base supports.
+High-level parametric generator for regular orthogonal 2D plane frames or 3D space frames of reinforced concrete. Provisions grid nodes, column/beam connectivity, the concrete and reinforcing-steel materials, rectangular sections that own them (with their clear cover), and base supports.
 - **Signature:**
   ```python
-  create_frame_model(num_bays=2, bay_width=5.0, num_stories=2, story_height=3.0, *, title=None, author=None, dimension="2d", bay_widths=None, story_heights=None, support_type="fixed", col_b=0.4, col_h=0.4, beam_b=0.3, beam_h=0.5, fc_kpa=27580.0, rho_kg_m3=2400.0) -> ToolResult
+  create_frame_model(num_bays=None, bay_width=None, num_stories=None, story_height=None, *, fc, fy=None, fyt=None, unit_weight=None, cover=None, stress_unit=None, weight_density_unit=None, title=None, author=None, units="kN, m", dimension="2d", bay_widths_x=None, bay_widths_y=None, story_heights=None, support_type="fixed", col_b=None, col_h=None, beam_b=None, beam_h=None) -> ToolResult
   ```
 - **Parameters:**
-  - `num_bays`: Number of horizontal bays (or list `bay_widths` for non-uniform spacing).
+  - `num_bays`: Number of horizontal bays (or list `bay_widths_x`, and `bay_widths_y` in 3D, for non-uniform spacing).
   - `bay_width`: Uniform bay width in meters.
   - `num_stories`: Number of vertical stories (or list `story_heights` for non-uniform floor heights).
   - `story_height`: Uniform story height in meters.
   - `dimension`: `"2d"` for plane frame, `"3d"` for space frame.
   - `support_type`: Base boundary conditions (`"fixed"` or `"pinned"`).
-  - `col_b`, `col_h`, `beam_b`, `beam_h`: Column and beam cross-section dimensions (m).
-- **Returns (`data`):** `{"project": Project, "n_nodes": int, "n_elements": int, "n_columns": int, "n_beams": int, "stories": int, "bays": int, ...}`
+  - `col_b`, `col_h`, `beam_b`, `beam_h`: Column and beam cross-section dimensions in model length units (omitted: trial sizes of 0.40 m columns and 0.30 × 0.50 m beams, converted to the model unit and reported).
+  - `fc` (required): concrete compressive strength f'c in the model stress unit, or in `stress_unit` (`kPa`, `MPa`, `Pa`, `psi`, `ksi`, `psf`, `ksf`).
+  - `fy`, `fyt`: longitudinal and transverse reinforcement yield strengths (same unit as `fc`; default ASTM A615 Grade 60, and `fyt = fy`).
+  - `unit_weight`: concrete unit weight in the model weight-density unit or `weight_density_unit` (`kN/m3`, `N/m3`, `pcf`, `kcf`, or `kg/m3` for a mass density such as 2400 kg/m³, weighed under standard gravity; default 150 pcf).
+  - `cover`: clear cover to the ties and stirrups, model length unit (default 1.5 in, ACI 318-25 Table 20.5.1.3.1).
+  - Geometry is required: `num_bays` and `bay_width` or `bay_widths_x`; `num_stories` and `story_height` or `story_heights`.
+- **Materials:** `CONCRETE` (`ConcreteMaterial`: f'c; E from f'c per ACI 318-25 §19.2.2.1 unless given), `REBAR` (`RebarMaterial`) and, when `fyt` differs from `fy`, `REBAR_TRANSVERSE`. Each section names its concrete (`material_id`), its bars (`rebar_material_id`, `transverse_rebar_material_id`) and its `cover`.
+- **Returns (`data`):** `{"project": Project, "n_nodes": int, "n_elements": int, "n_columns": int, "n_beams": int, "section_ids": {"columns": "COL", "beams": "BEAM"}, "stories": int, "bays": int, "materials": list, "cover": float, "defaults_applied": list, ...}`. Section IDs are stable: resizing keeps them, so they carry no dimensions. `defaults_applied` lists every value that was not given (name, value, unit, source).
 - **Example:**
   ```python
-  res = create_frame_model(num_bays=3, bay_width=6.0, num_stories=4, story_height=3.5, dimension="3d")
+  res = create_frame_model(num_bays=3, bay_width=6.0, num_stories=4, story_height=3.5, dimension="3d",
+                           fc=30.0, fy=420.0, stress_unit="MPa", cover=0.04)
   project = res.data["project"]
-  ```
-
-#### `build_structural_model`
-Constructs or augments arbitrary/irregular structural geometry (trusses, braced frames, angled members, bridges) directly from structured JSON lists.
-- **Signature:**
-  ```python
-  build_structural_model(project=None, *, nodes=None, elements=None, materials=None, sections=None, supports=None, title=None) -> ToolResult
-  ```
-- **Parameters:**
-  - `project`: Optional existing `Project` to populate or update; if `None`, creates a new one.
-  - `nodes`: List of dicts `[{"id": 1, "x": 0.0, "y": 0.0, "z": 0.0}, ...]`.
-  - `elements`: List of dicts `[{"id": "E1", "type": "beam"|"truss", "start_node": 1, "end_node": 2}, ...]`.
-  - `supports`: List of dicts `[{"node_id": 1, "fixity": "fixed"|"pinned"}, ...]`.
-- **Returns (`data`):** `{"project": Project, "n_nodes": int, "n_elements": int, "n_supports": int}`
-- **Example:**
-  ```python
-  res = build_structural_model(
-      nodes=[{"id": 1, "x": 0, "y": 0}, {"id": 2, "x": 6, "y": 0}, {"id": 3, "x": 3, "y": 2.5}],
-      elements=[{"id": "T1", "type": "truss", "start_node": 1, "end_node": 2}],
-      supports=[{"node_id": 1, "fixity": "pinned"}, {"node_id": 2, "fixity": "pinned"}]
-  )
   ```
 
 #### `create_model_from_plan_draft`
@@ -309,6 +310,9 @@ Compiles a complete 3D structural model from an architectural or structural floo
   ```
 - **Parameters:**
   - `draft`: `FloorPlanDraft` instance or dictionary with `x_grids`, `y_grids`, `stories`, `columns`, `beams`.
+  - `default_col_b`, `default_col_h`, `default_beam_b`, `default_beam_h`: sections of members without their own size, including the automatically placed ones (model length units; default 0.45 m columns and 0.30 × 0.50 m beams).
+  - `fc` (required): f'c in the draft's stress unit, or in `stress_unit`; `fy`, `fyt`, `unit_weight` (`weight_density_unit`) and `cover` as in `create_frame_model`. A draft from before f'c followed the draft units (`concrete_fc`) is read as MPa.
+  - The model is created without loads; apply them with `apply_gravity_loads`.
   - `project`: Optional existing `Project` container.
 - **Returns (`data`):** `{"project": Project, "title": str, "n_nodes": int, "n_elements": int, "n_columns": int, "n_beams": int, ...}`
 
@@ -319,12 +323,19 @@ Provides a human- and LLM-readable summary of project status, geometry counts, a
 
 #### `modify_project`
 Applies declarative model modifications (updating rectangular, circular, or general section dimensions, member reassignments, material properties) or an optional programmatic callback mutator function safely to a `Project`.
-- **Signature:** `modify_project(project, mutator=None, *, sections=None, member_assignments=None, materials=None) -> ToolResult`
+- **Signature:** `modify_project(project, mutator=None, *, sections=None, member_assignments=None, materials=None, stress_unit=None, weight_density_unit=None) -> ToolResult`
+- **Materials** (model units, or `stress_unit` / `weight_density_unit`): `{"id", "type": "concrete", "fc", "E", "nu", "unit_weight"}`, `{"id", "type": "rebar", "fy", "fu", "E", "unit_weight"}`, or `{"id", "E", ...}`. An existing material keeps what is not given; a stated modulus (e.g. an imported material that is now given f'c) is kept, while the default E of a concrete follows a new f'c. Concrete sections without bars or cover then take Grade 60 bars and the 1.5 in cover (reported in `defaults_applied`).
+- **Sections** own their material: a new section needs `material_id`; an existing one keeps every property that is not given, and a change of shape keeps its materials and cover. Members take a material only through their section (`member_assignments` with a `material_id` is refused).
+- A refused modification leaves the model unchanged.
+- Stored member self-weight loads (`is_self_weight`) are recomputed from the new sections and materials, so the next analysis carries the updated weight (`data["self_weight_updated_cases"]`, new totals in `data["total_dead_load"]`).
+- ELF story forces from `apply_lateral_loads` are regenerated from the new seismic weight (`data["seismic_loads"]`), so the next design does not use the lateral loads of the old sections. ELF loads built from a `SeismicParameters` object or a custom mass source cannot be replayed; the result then asks for `apply_lateral_loads` to be called again.
+- Resize a section by its existing ID; each entry of `data["sections_updated"]` reports the `n_elements` that carry it. A new section or material ID must be assigned to members through `member_assignments` in the same call, and unknown element IDs are rejected. Otherwise the call fails with the IDs in use, because it would change nothing.
 - **Examples:**
-  - Rectangular section: `modify_project(project, sections=[{"id": "Col_350x350", "b": 0.45, "h": 0.45}])`
+  - Rectangular section: `modify_project(project, sections=[{"id": "COL", "b": 0.45, "h": 0.45}])`
   - Circular section: `modify_project(project, sections=[{"id": "Pier_D500", "d": 0.60}])`
   - General section: `modify_project(project, sections=[{"id": "W14x90", "type": "general", "A": 0.0171, "I3": 0.000416}])`
-  - Member reassignment: `modify_project(project, member_assignments=[{"element_ids": ["C1", "C2"], "section_id": "Col_450x450"}])`
+  - New section for some members: `modify_project(project, sections=[{"id": "COL_CORNER", "b": 0.5, "h": 0.5, "material_id": "CONCRETE"}], member_assignments=[{"element_ids": ["C_1_1", "C_4_1"], "section_id": "COL_CORNER"}])`
+  - Concrete strength of an imported model: `modify_project(project, materials=[{"id": "CONC", "type": "concrete", "fc": 4.0}], stress_unit="ksi")`
 
 #### `set_project_units`
 Explicitly defines or converts project units across all entities via `struct_core.units`.
@@ -355,13 +366,14 @@ Full JSON serialization and deserialization round-trip for `struct_core.Project`
 Ingests SAP2000 `.s2k` or `.$2k` text files into a validated `Project`. Automatically extracts nodes, frame elements, sections, materials, supports, load cases/patterns, and unit system metadata.
 - **Signature:**
   ```python
-  import_from_sap2000(s2k_path, *, project_title=None, materialize_self_weight=False) -> ToolResult
+  import_from_sap2000(s2k_path, *, project_title=None, materialize_self_weight=False, fy=None, fyt=None, cover=None, stress_unit=None) -> ToolResult
   ```
 - **Parameters:**
   - `s2k_path`: File path to the SAP2000 `.s2k` file.
   - `project_title`: Optional title override.
   - `materialize_self_weight`: When `True`, automatically computes and adds member self-weight line loads into the dead load case.
-- **Returns (`data`):** `{"project": Project, "n_nodes": int, "n_elements": int, "n_supports": int, "load_cases": list, "units": str}`
+  - `fy`, `fyt`, `cover`, `stress_unit`: the reinforcement of the concrete frame sections the file gives no bars for (yield strengths in the model stress unit or `stress_unit`, `fyt` default `fy`; cover in the model length unit, default 1.5 in, reported). Sections with reinforcement in the file keep it.
+- **Returns (`data`):** `{"project": Project, "n_nodes": int, "n_elements": int, "n_load_cases": int, "materials": list, "import_notes": list, "before_design": list}`. Materials are read as the file defines them (concrete f'c, rebar fy / fu); nothing is invented. `before_design` lists what reinforced-concrete design still needs, e.g. a material without f'c, to be given with `modify_project`.
 - **Example:**
   ```python
   res = import_from_sap2000("frame.s2k", materialize_self_weight=True)
@@ -377,7 +389,7 @@ Exports a `Project` model to a native SAP2000 `.s2k` text file with full coordin
 Ingests from and exports to ETABS `.e2k` / `.$et` text files with full floor-story, grid, and framing connectivity preservation.
 - **Signatures:**
   ```python
-  import_from_etabs(e2k_path, *, project_title=None) -> ToolResult
+  import_from_etabs(e2k_path, *, project_title=None, fy=None, fyt=None, cover=None, stress_unit=None) -> ToolResult
   export_to_etabs(project, *, output_path) -> ToolResult
   ```
 
@@ -386,25 +398,26 @@ Ingests from and exports to ETABS `.e2k` / `.$et` text files with full floor-sto
 ### 3. Building Code Loading & Sizing Tools (`struct_load`)
 
 #### `preliminary_sizing`
-Performs rule-of-thumb span-to-depth structural member dimensioning for beams ($L/12$ to $L/16$) and columns based on tributary area and concrete compressive strength.
+Gives the frame's rectangular column and beam sections rule-of-thumb starting sizes, keeping their IDs and materials (it creates no section or material; define them first): beams $h = L_{\max}/14$ (at least 0.30 m / 12 in) and $b = 0.55h$; square columns $= H_{\max}/10$; rounded up to 0.05 m (2 in for US units). Members are classified as beams or columns by orientation (`struct_core.classify_frame_members`, any vertical axis). The sizes are applied through `modify_project`, so self-weight and ELF story forces are regenerated.
 - **Signature:**
   ```python
-  preliminary_sizing(project, *, material_id="Concrete_4ksi", fc_kpa=27580.0) -> ToolResult
+  preliminary_sizing(project, *, min_beam_width=None, min_col_dim=None) -> ToolResult
   ```
-- **Returns (`data`):** `{"project": Project, "n_beams_sized": int, "n_columns_sized": int, "summary": dict}`
+- **Returns (`data`):** the `modify_project` data (`project`, `sections_updated`, regenerated loads) plus `sections_sized` (`id`, `role`, `governing_length`, `b`, `h`).
 
 #### `apply_gravity_loads`
 Applies ASCE 7 / IBC occupancy-based live loads (e.g. `"office"`, `"residential"`, `"classroom"`, `"storage"`) and superimposed dead loads distributed across member tributary widths.
 - **Signature:**
   ```python
-  apply_gravity_loads(project, *, occupancy="office", tributary_width=5.0, superimposed_dead=1.5, include_self_weight=True) -> ToolResult
+  apply_gravity_loads(project, *, occupancy, superimposed_dead, tributary_width=None, include_self_weight=True, partition_weight=None, pressure_unit=None) -> ToolResult
   ```
 - **Parameters:**
-  - `occupancy`: ASCE 7 occupancy category name.
-  - `tributary_width`: Tributary floor width in meters (or feet).
-  - `superimposed_dead`: Additional dead load in kPa (or psf).
+  - `occupancy` (required): ASCE 7 occupancy category name.
+  - `tributary_width`: Tributary floor width in the model length unit; required for one-way distribution (every 2D frame). In 3D, omitted means two-way floor panels.
+  - `superimposed_dead` (required; 0 for none): Additional dead load in the model pressure unit (kPa for `kN, m`, ksf for `kip, ft`), or in `pressure_unit` (`kPa`, `Pa`, `MPa`, `psf`, `ksf`, `psi`, `ksi`). Pressures above 50 kPa are rejected as unit mistakes.
   - `include_self_weight`: When `True`, automatically triggers self-weight calculations.
-- **Returns (`data`):** `{"project": Project, "load_cases_created": list, "total_gravity_load_kN": float}`
+  - `partition_weight`: Partition weight for the seismic mass (ASCE 7-22 §12.7.2 item 2), as a pressure in model units. It defaults to 0.48 kPa (10 psf) for occupancies with a partition allowance. It is stored as the `PartitionWeight` case, which the combinations ignore.
+- **Returns (`data`):** `dead_case_id`, `live_case_id`, `partition_weight_case_id` (or `None`), `total_dead_load` (member self-weight plus superimposed dead load, which is the total dead load W), `total_live_load`, `total_partition_weight`, and `force_unit`. The totals are the resultants of each case in the model force unit.
 
 #### `apply_self_weight`
 Computes the exact volumetric weight of all frame elements ($w = -\rho \cdot A \cdot g$) using material densities and section cross-sectional areas, and materializes continuous downward line loads directly into the target load case in the `Project` schema. (Note: `run_analysis` automatically computes and applies self-weight on the fly for any cases with `include_self_weight=True` without needing to mutate the project model; use `apply_self_weight` when you want to permanently bake element line loads into the schema).
@@ -422,12 +435,16 @@ Computes the exact volumetric weight of all frame elements ($w = -\rho \cdot A \
 Computes and applies ASCE 7-22 seismic Equivalent Lateral Force (ELF) vertical distribution and Main Wind Force Resisting System (MWFRS) wind pressures as nodal story forces.
 - **Signature:**
   ```python
-  apply_lateral_loads(project, *, code="ASCE7-22", sds=0.75, sd1=0.40, r_factor=8.0, wind_speed=None) -> ToolResult
+  apply_lateral_loads(project, *, code="ASCE7-22", sds=None, sd1=None, s1=None, tl=None, r_factor=None, importance_factor=None, system_type="rc_smf", site_class=None, risk_category=None, wind_speed=None, tributary_width=None, ...) -> ToolResult
   ```
 - **Parameters:**
-  - `sds`, `sd1`: Design spectral acceleration parameters ($S_{DS}, S_{D1}$).
-  - `r_factor`: Seismic response modification coefficient $R$.
-  - `wind_speed`: Basic wind speed in m/s (or mph).
+  - `sds`, `sd1`: Design spectral acceleration parameters ($S_{DS}, S_{D1}$) of the site; both required for seismic loads.
+  - `r_factor`: Seismic response modification coefficient $R$; default from `system_type` (ASCE 7-22 Table 12.2-1).
+  - `importance_factor`: default from `risk_category` (Table 1.5-2: I/II 1.0, III 1.25, IV 1.5). `risk_category` defaults to II and `site_class` to D; both are reported in `defaults_applied`.
+  - `tl`: mapped long-period transition period; needed only when the period exceeds 4 s (the smallest mapped TL).
+  - `s1`: Mapped S1; without it the Eq. 12.8-7 lower bound is not evaluated, and the result says so.
+  - `system_type`, `importance_factor`, `risk_category`: recorded with R, Ω0 and Cd (Table 12.2-1) as `project.seismic_basis`, which drives the drift checks of `run_analysis` and the Chapter 18 checks of `run_design`.
+  - `wind_speed`: Basic wind speed in m/s (or mph), with `tributary_width` (the frame's loaded width, model length unit), which wind loads require.
 - **Returns (`data`):** `{"project": Project, "seismic_base_shear_kN": float, "wind_base_shear_kN": float, ...}`
 
 #### `generate_load_combinations`
@@ -455,7 +472,7 @@ Validates model integrity per `struct_core` schema rules before solver execution
 Solves linear static equilibrium ($\mathbf{K}\mathbf{u} = \mathbf{f}$) or natural eigenvalue modal dynamics ($\mathbf{K}\boldsymbol{\phi} = \omega^2\mathbf{M}\boldsymbol{\phi}$). Automatically detects whether the structure is 2D or 3D and dispatches to `fem2d` or `fem3d`. Results are packaged into `AnalysisResult` and attached to `project.analysis_results`.
 - **Signature:**
   ```python
-  run_analysis(project, *, analysis_case_id, analysis_type="static", solver="auto", load_case_id=None, num_modes=6, include_self_weight=True) -> ToolResult
+  run_analysis(project, *, analysis_case_id, analysis_type="static", solver="auto", load_case_id=None, num_modes=6, include_self_weight=True, cracked_sections=False, second_order=False) -> ToolResult
   ```
 - **Parameters:**
   - `analysis_case_id`: Name identifier for this analysis run (e.g. `"Dead_Static"`, `"Modal"`).
@@ -464,7 +481,9 @@ Solves linear static equilibrium ($\mathbf{K}\mathbf{u} = \mathbf{f}$) or natura
   - `load_case_id`: Target load case or combination to solve (for static).
   - `num_modes`: Number of natural vibration modes to extract (for modal).
   - `include_self_weight`: When `True` (default), automatically computes and includes member self-weight line loads via `struct_load` for any load cases with `include_self_weight=True` without mutating the project schema.
-- **Returns (`data`):** `{"project": Project, "analysis_case_id": str, "summary": dict}`
+  - `cracked_sections`: Analyse with the ACI 318-25 Table 6.6.3.1.1 stiffness (0.70 I_g columns, 0.35 I_g beams) for static and modal runs. With an ELF seismic basis, story drift (ASCE 7-22 §12.12.1, Table 12.12-1) and the stability coefficient θ (§12.8.7) are checked.
+  - `second_order`: Requires `cracked_sections`. Applies ACI 318-25 §6.6.4: sway cases are magnified per story by δ_s (stability index Q from the story drift and shear), and columns by δ with C_m and M_2,min. The §6.6.4.6.2 and §6.2.5.3 limits become checks.
+- **Returns (`data`):** `{"project": Project, "analysis_case_id": str, "summary": dict, "stiffness_basis": str, ...}`, plus `second_order` (per-story Q and δ_s) and `frame_checks` (`n_checks`, `all_passed`, `governing`) when they apply. The checks are also stored in `AnalysisResult.code_checks`, which `run_design` includes.
 - **Example:**
   ```python
   res = run_analysis(project, analysis_case_id="1.2D+1.6L", solver="auto")
@@ -486,12 +505,20 @@ Executes dynamic earthquake response history integration using `structdyn`. Brid
   run_time_history(project, *, analysis_case_id, ground_motion="elcentro", component=None, direction="x", dt=None, scale_factor=1.0, damping_ratio=0.05, n_modes_damping=2, method="newmark_beta", solver="auto", envelope_to_design=True) -> ToolResult
   ```
 - **Parameters:**
-  - `ground_motion`: Ground motion name (`"elcentro"`, `"northridge"`, `"northridge:hor2"`), `GroundMotion` object, or array.
-  - `component`: Specific component (`"hor1"`, `"hor2"`, `"up"`). Inferred from `direction` if omitted.
-  - `direction`: Ground motion component (`"x"`, `"y"`, or `"z"`).
+  - `ground_motion`: record file path (PEER `.AT2`, or two-column `.csv` of time [s] and acceleration [g]), built-in event name (`"elcentro"`, `"loma_prieta"`, `"loma_prieta:hor2"`), `GroundMotion` object, or acceleration array in g.
+  - `component`: Component of a built-in event (`"hor1"`, `"hor2"`, `"up"`). Inferred from `direction` if omitted.
+  - `direction`: Excitation direction (`"x"`, `"y"`, or `"z"`).
   - `damping_ratio`: Modal or Rayleigh damping ratio $\zeta$ (default: $0.05$).
-  - `envelope_to_design`: When `True`, synthesizes peak dynamic $P, V_y, V_z, M_y, M_z$ into `AnalysisResult` for downstream ACI 318 design.
-- **Returns (`data`):** `{"project": Project, "analysis_case_id": str, "max_disp_m": float, "max_base_shear_kN": float, ...}`
+  - `envelope_to_design`: When `True`, envelopes member $P, V, T, M$ at the standard stations over all time steps for downstream ACI 318 design.
+- **Seismic mass:** when neither the call nor the model defines a mass source, the ASCE 7-22 §12.7.2 mass source is attached (dead load 100 %, storage live 25 %, general live 0 %; member self-weight counted once). The same lumped-mass convention is used by modal analysis and RSA, so all three report the same periods.
+- **Returns (`data`):** `fundamental_period`, `peak_lateral_displacement`, `peak_base_shear` (from global equilibrium of restoring forces), member force envelopes, `n_steps`, `pga`, ...
+
+#### `run_response_spectrum`
+Response spectrum analysis (CQC/SRSS) from an ASCE 7 design spectrum (`sds`, `sd1`), a record (`ground_motion`, same inputs as above), or a user curve. Forces are divided by R/Ie (`r_factor`, `importance_factor`; no reduction when `r_factor` is omitted; Ie defaults to the value of `risk_category`, ASCE 7-22 Table 1.5-2). `tl` (the mapped TL) is needed only for modes with periods above 4 s. With `direction="both"` the X and Y responses are kept separate, and each direction's sign-less response is stored as `<analysis_case_id>_EX` / `_EY` with its support reactions (the combined base forces of the members at each support, in global axes) for the footing bearing check of `run_design`.
+- **ELF scaling (ASCE 7-22 §12.9.1.4.1):** for a design-spectrum RSA with `r_factor`, the forces in each direction are multiplied by V/Vt where the modal base shear Vt is below the ELF base shear V = Cs·W (T of the dominant mode, capped at Cu·Ta). `system_type` (e.g. `"rc_smf"`) is then required for Ta; `s1` enables the Eq. 12.8-7 lower bound. The factors are reported in `data["elf_scaling"]`. Record-spectrum RSA has no SDS, so it is not scaled (the reason is reported).
+- **Design envelope:** when the model has dead (and live) load cases, the sign-less spectral response is combined with them through the ASCE 7-22 LRFD combinations (Ev = 0.2·SDS·D when `sds` is given; 1.0E_X ± 0.3E_Y for bi-directional runs), taking the governing branch of G ± E at each station. The envelope is stored as `<analysis_case_id>_design` and made the active case, so `run_design` checks gravity plus earthquake.
+- **Cracked sections and second order:** `cracked_sections` and `second_order` work as in `run_analysis`. Story drifts and story shears are CQC combinations of the modal values; drift is checked against Table 12.12-1 (scaled per §12.9.1.4.2 when S1 ≥ 0.6) and θ against θ_max. `risk_category` sets the drift limit.
+- **Returns (`data`):** `combined_base_shear` (largest direction, after scaling), `base_shear_by_direction`, `elf_scaling`, `fundamental_period`, `design_case_id`, ...
 
 #### `inspect_dynamic_results`
 Summarizes peak dynamic responses, floor displacement envelopes, base shear time histories, and inter-story drift ratios.
@@ -502,12 +529,16 @@ Summarizes peak dynamic responses, floor displacement envelopes, base shear time
 ### 7. RC Design & Detailing Tools (`aci318`)
 
 #### `run_design`
-Runs reinforced concrete code checks per **ACI 318-19** using `aci318`. Evaluates beam flexure ($M_u \le \phi M_n$), beam shear ($V_u \le \phi V_n$), column axial-flexural P-M interaction, and shear ties. Synthesizes longitudinal bar layouts, stirrup schedules, and demand-capacity ratios (DCR).
+Designs the reinforcement and runs reinforced concrete code checks per **ACI 318-25** using `aci318`. Beams are reinforced for the analysis envelope. Column longitudinal bars are designed between 1 % and 8 % of $A_g$ (6 % for special moment frames) for axial-flexural strength and, in special moment frames, strong-column/weak-beam. Evaluates beam flexure ($M_u \le \phi M_n$), beam shear ($V_u \le \phi V_n$), column axial-flexural P-M interaction, and shear ties, and reports stirrup schedules and demand-capacity ratios (DCR).
 - **Signature:**
   ```python
-  run_design(project, *, design_case_id, design_code="ACI 318-19", analysis_case_id=None) -> ToolResult
+  run_design(project, *, design_case_id, design_code="ACI 318-25", analysis_case_id=None, allowable_bearing_pressure=None, pressure_unit=None, footing_cover=None) -> ToolResult
   ```
-- **Returns (`data`):** `{"project": Project, "design_case_id": str, "summary": {"status": "PASS"|"FAIL", "max_dcr": float, ...}}`
+- **Materials:** every member is designed with the concrete (f'c, unit weight for λ), bars (fy, fyt) and clear cover of its section; a section without them is refused with the reason (`modify_project` sets them).
+- **Footings (ACI 318-25 R13.2.6.1):** an isolated footing under each supported column, sized for `allowable_bearing_pressure` (model pressure unit or `pressure_unit`; default 150 kPa, reported as a preliminary assumption) from the service-level reactions, and designed for one-way shear, punching and flexure from the factored ones, with `footing_cover` (model length unit; default 3 in). The service reactions are the ASCE 7-22 §2.4 combinations of the stored load-case results; a response spectrum enters as ±0.7|E| on each reaction component (one result adds it to every component, a second subtracts it from the vertical reaction). Without stored load-case results the footings are not designed, and `data["foundations"]` says why.
+- **Design basis:** an analysis of the factored load combinations: the envelope of `generate_load_combinations` + `run_analysis`, a response spectrum or response history design envelope, or a single combination. Unfactored load-case results and a seismic-only response spectrum result are refused.
+- **Frame checks:** beam-column joint shear for every frame (ACI 318-25 Chapter 15), plus the Chapter 18 checks of the frame type recorded in `project.seismic_basis`: special frames get capacity-design shear, strong-column/weak-beam, confinement and joints; intermediate frames get capacity shear and joints. The analysis checks (slenderness, drift, stability) are included too. When one of these governs, `governing_member_type` is `"frame"` and `governing_member_id` is `None`.
+- **Returns (`data`):** `governing_dcr`, `passed`, `governing_member_id`, `governing_member_type`, `governing_limit_state`, `dcr_flexure`, `dcr_shear` for the superstructure (beams and columns), plus `foundation_governing_dcr` for the footings and `foundations` (the bearing pressure and cover used, and the defaults among them). The design result's `inputs` (`DesignInputs`) records the code, materials, sections, bearing pressure, footing cover and `defaults_applied`. Beam DCRs are $M_u/\phi M_n$ of the selected bars and $V_u/\phi V_n$ of the designed stirrups (or the $8\sqrt{f'_c}b_w d$ section limit); a beam with no feasible reinforcement reports DCR > 1.
 
 #### `inspect_design_results`
 Returns detailed member-by-member Demand-Capacity Ratios (DCR), governing load combinations, and pass/fail statuses.
@@ -735,7 +766,7 @@ draft = FloorPlanDraft(
         StoryDraft(id="Story2", level=2, height=3.0),
     ],
     support_type="fixed",
-    default_fc_kpa=27580.0,  # 4 ksi concrete
+    fc=4.0, stress_unit="ksi",  # concrete f'c (required)
 )
 
 # 2. Build 3D Project via ToolResult wrapper (or directly via build_project_from_draft)

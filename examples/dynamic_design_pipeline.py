@@ -47,6 +47,7 @@ def run_dynamic_pipeline():
         col_h=0.45,
         beam_b=0.35,
         beam_h=0.55,
+        fc=27580.0,         # f'c = 27.58 MPa = 27,580 kPa in kN, m; Grade 60 bars and 1.5 in cover by default
     )
     assert create_res.ok, f"Model creation failed: {create_res.error}"
     project = create_res.data["project"]

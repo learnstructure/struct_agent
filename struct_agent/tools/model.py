@@ -8,10 +8,10 @@ inspection, and modification.
 
 from __future__ import annotations
 
-import math
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from struct_core import (
+    AppliedDefault,
     BeamElement,
     CircularSection,
     ElasticMaterial,
@@ -23,6 +23,8 @@ from struct_core import (
     Support,
     TrussElement,
     Units,
+    conversion_factor,
+    validate_structural_model,
     load_json,
     parse_units,
     save_json,
@@ -32,191 +34,446 @@ from ..state.project_state import ProjectState, WorkflowStage
 from ..vision.compiler import build_project_from_draft
 from ..vision.schemas import FloorPlanDraft, normalize_floor_plan_dict
 from .base import AgentError, ToolResult
+from .. import defaults
+from .materials import concrete_material, rebar_material
+from .units_input import check_realistic
 
 
-def parse_model_dict(model_data: Dict[str, Any]) -> StructuralModel:
+class ModelInputError(ValueError):
+    """Model data that cannot become a model; the message lists every problem."""
+
+
+def _material_from_dict(data: Dict[str, Any], units: Any) -> Tuple[Any, List[AppliedDefault]]:
+    """A material from tool input (model units): concrete when it is typed so or gives f'c, rebar when typed so or
+    gives fy (their defaults applied and returned), otherwise an elastic material with the given E."""
+    kind = str(data.get("type", "")).lower()
+    mid = data.get("id")
+    if mid is None:
+        raise ModelInputError(f"A material has no id: {data}")
+    if kind == "concrete" or (kind in ("", "elastic") and data.get("fc") is not None):
+        if data.get("fc") is None:
+            raise ModelInputError(f"Concrete material {mid!r} needs fc (f'c, model stress unit).")
+        material, used = concrete_material(mid, fc=float(data["fc"]), units=units, E=data.get("E"), nu=data.get("nu"),
+                                           unit_weight=data.get("unit_weight"), name=data.get("name"))
+        if data.get("rho") is not None:
+            material = material.model_copy(update={"rho": data["rho"]})
+        return material, used
+    if kind == "rebar" or (kind in ("", "elastic") and data.get("fy") is not None):
+        material, used = rebar_material(mid, units=units, fy=data.get("fy"), fu=data.get("fu"), E=data.get("E"),
+                                        unit_weight=data.get("unit_weight"), name=data.get("name"))
+        if data.get("rho") is not None:
+            material = material.model_copy(update={"rho": data["rho"]})
+        return material, used
+    if data.get("E") is None:
+        raise ModelInputError(f"Material {mid!r} needs E (or type 'concrete' with fc, or 'rebar').")
+    return ElasticMaterial(**{k: v for k, v in data.items() if k != "type"}), []
+
+
+def _merged_material_input(current: Any, given: Dict[str, Any]) -> Dict[str, Any]:
+    """Tool input for updating material ``current`` (None for a new one): the given values over the current name,
+    ν, unit weight and mass density, and over its type unless a new one is given. Its E is kept when it was a stated
+    modulus (an elastic material, e.g. imported from SAP2000 / ETABS, that is now given f'c); the E of a concrete
+    follows a new f'c unless E is given."""
+    if current is None:
+        return given
+    kept = {k: getattr(current, k, None) for k in ("name", "nu", "unit_weight", "rho")}
+    if "type" not in given and current.type in ("concrete", "rebar"):
+        kept["type"] = current.type
+    if current.type == "elastic" or not ({"fc", "fy"} & set(given)):
+        kept["E"] = current.E
+    for key in ("fc", "fy", "fu"):
+        if getattr(current, key, None) is not None:
+            kept[key] = getattr(current, key)
+    return {**{k: v for k, v in kept.items() if v is not None}, **given}
+
+
+def _section_from_dict(data: Dict[str, Any]) -> Any:
+    """A section from tool input: circular with d, general with A, otherwise rectangular (b, h)."""
+    if data.get("material_id") is None:
+        raise ModelInputError(f"Section {data.get('id')!r} needs material_id (a section owns its material).")
+    fields = {k: v for k, v in data.items() if k != "type"}
+    if data.get("type") == "circular" or "d" in data:
+        return CircularSection(**fields)
+    if data.get("type") == "general" or "A" in data:
+        return GeneralSection(**fields)
+    return RectangularSection(**fields)
+
+
+def complete_concrete_sections(materials: List[Any], sections: List[Any], units: Any) -> List[AppliedDefault]:
+    """Give concrete sections (a ``ConcreteMaterial``) without reinforcement data their bars and cover: the model's
+    reinforcing steel when it has exactly one (e.g. the one just given), Grade 60 bars (material 'REBAR', added) when
+    it has none, and the 1.5 in clear cover. With several rebar materials the section is left for the user to
+    assign. Updates the lists in place and returns the defaults applied."""
+    applied: List[AppliedDefault] = []
+    concrete_ids = {m.id for m in materials if getattr(m, "type", None) == "concrete"}
+    for i, sec in enumerate(sections):
+        if sec.material_id not in concrete_ids or not hasattr(sec, "cover"):
+            continue
+        update: Dict[str, Any] = {}
+        if sec.rebar_material_id is None:
+            rebars = [m.id for m in materials if getattr(m, "type", None) == "rebar"]
+            if not rebars:
+                rebar, used = rebar_material("REBAR", units=units)
+                materials.append(rebar)
+                applied += used
+                rebars = [rebar.id]
+            if len(rebars) == 1:
+                update["rebar_material_id"] = rebars[0]
+        if sec.transverse_rebar_material_id is None:
+            update["transverse_rebar_material_id"] = update.get("rebar_material_id", sec.rebar_material_id)
+        if sec.cover is None:
+            update["cover"] = defaults.COVER.in_units(units)
+            applied.append(defaults.COVER.record(sec.id, model_units=units))
+        if update:
+            sections[i] = sec.model_copy(update=update)
+    return applied
+
+
+def missing_design_inputs(model: StructuralModel) -> List[str]:
+    """What keeps the frame members from reinforced-concrete design: sections whose material is not a concrete with
+    f'c, or that lack rebar materials or cover."""
+    used = {e.section_id for e in model.elements}
+    problems = []
+    for sec in model.sections:
+        if sec.id not in used:
+            continue
+        mat = next((m for m in model.materials if m.id == sec.material_id), None)
+        if getattr(mat, "type", None) != "concrete":
+            problems.append(f"section {sec.id!r}: material {sec.material_id!r} has no f'c (give it type 'concrete' "
+                            f"and fc with modify_project)")
+        elif getattr(sec, "rebar_material_id", None) is None or getattr(sec, "cover", None) is None:
+            problems.append(f"section {sec.id!r}: no reinforcement (rebar material, cover); give the bars with "
+                            f"modify_project(materials=[{{'id': 'REBAR', 'type': 'rebar', 'fy': <fy>}}])")
+    return problems
+
+
+def parse_model_dict(
+    model_data: Dict[str, Any],
+    units: Any = None,
+) -> Tuple[StructuralModel, List[AppliedDefault]]:
     """
-    Parse a flexible dictionary containing nodes, elements, materials, sections,
-    and supports into a validated struct_core.StructuralModel.
-    Automatically provisions standard defaults if optional fields are missing.
+    Parse a dictionary of nodes, elements, materials, sections and supports (model units) into a validated
+    ``StructuralModel``, and the defaults applied.
+
+    Nothing is invented: every node needs x and y, every section its ``material_id``, every element its
+    ``section_id``, and every material its properties (concrete f'c, an elastic E). Concrete materials and concrete
+    sections take the documented defaults for what is not given (E from f'c, unit weight, Grade 60 bars, 1.5 in
+    cover). Raises ``ModelInputError`` listing every problem.
     """
-    # 1. Parse Nodes
+    applied: List[AppliedDefault] = []
+    given_units = model_data.get("units") or units
+    if given_units is None:
+        units = parse_units(defaults.UNITS.value)
+        applied.append(defaults.UNITS.record())
+    else:
+        units = parse_units(given_units)
+    problems: List[str] = []
+
     nodes: List[Node] = []
     for n in model_data.get("nodes", []):
         if isinstance(n, Node):
             nodes.append(n)
         elif isinstance(n, dict):
-            nodes.append(Node(
-                id=n.get("id", len(nodes) + 1),
-                x=float(n.get("x", 0.0)),
-                y=float(n.get("y", 0.0)),
-                z=float(n.get("z", 0.0)),
-            ))
+            if n.get("x") is None or n.get("y") is None:
+                problems.append(f"Node {n.get('id')!r} needs x and y")
+                continue
+            nodes.append(Node(id=n.get("id", len(nodes) + 1), x=float(n["x"]), y=float(n["y"]),
+                              z=float(n.get("z") or 0.0)))
 
-    # 2. Parse Materials (ensure at least one concrete material exists)
     materials: List[Any] = []
-    existing_mat_ids = set()
     for m in model_data.get("materials", []):
-        if isinstance(m, dict):
-            mid = str(m.get("id", "Concrete_4ksi"))
-            existing_mat_ids.add(mid)
-            materials.append(ElasticMaterial(
-                id=mid,
-                E=float(m.get("E", 24800000.0)),
-                nu=float(m.get("nu", 0.2)),
-                rho=float(m.get("rho", 2400.0)),
-            ))
-        else:
+        if not isinstance(m, dict):
             materials.append(m)
-            existing_mat_ids.add(getattr(m, "id", ""))
+            continue
+        try:
+            material, used = _material_from_dict(dict(m), units)
+        except (ModelInputError, ValueError) as exc:
+            problems.append(str(exc))
+            continue
+        materials.append(material)
+        applied += used
 
-    default_mat_id = "Concrete_4ksi"
-    if default_mat_id not in existing_mat_ids:
-        materials.append(ElasticMaterial(id=default_mat_id, E=24800000.0, nu=0.2, rho=2400.0))
-        existing_mat_ids.add(default_mat_id)
-
-    # 3. Parse Sections
     sections: List[Any] = []
-    existing_sec_ids = set()
-    for s in model_data.get("sections", []):
-        if isinstance(s, dict):
-            sid = str(s.get("id", "Default_Section"))
-            existing_sec_ids.add(sid)
-            sections.append(RectangularSection(
-                id=sid,
-                b=float(s.get("b", 0.3)),
-                h=float(s.get("h", 0.5)),
-            ))
-        else:
-            sections.append(s)
-            existing_sec_ids.add(getattr(s, "id", ""))
+    for sec in model_data.get("sections", []):
+        if not isinstance(sec, dict):
+            sections.append(sec)
+            continue
+        try:
+            check_realistic("cover", sec.get("cover"), units)
+            sections.append(_section_from_dict(sec))
+        except (ModelInputError, ValueError) as exc:
+            problems.append(str(exc))
 
-    default_sec_id = "Default_Section"
-    if default_sec_id not in existing_sec_ids:
-        sections.append(RectangularSection(id=default_sec_id, b=0.35, h=0.45))
-        existing_sec_ids.add(default_sec_id)
+    applied += complete_concrete_sections(materials, sections, units)
 
-    # 4. Parse Elements
     elements: List[Any] = []
     for e in model_data.get("elements", []):
-        if isinstance(e, dict):
-            eid = e.get("id", f"E{len(elements)+1}")
-            sn = e["start_node"]
-            en = e["end_node"]
-            mid = e.get("material_id") or default_mat_id
-            sid = e.get("section_id") or default_sec_id
-            if sid not in existing_sec_ids:
-                sections.append(RectangularSection(id=sid, b=0.35, h=0.45))
-                existing_sec_ids.add(sid)
-            etype = str(e.get("type", "beam")).lower()
-            if etype == "truss":
-                elements.append(TrussElement(id=eid, start_node=sn, end_node=en, material_id=mid, section_id=sid))
-            else:
-                elements.append(BeamElement(id=eid, start_node=sn, end_node=en, material_id=mid, section_id=sid))
-        else:
+        if not isinstance(e, dict):
             elements.append(e)
+            continue
+        etype = str(e.get("type", "beam")).lower()
+        eid = e.get("id", f"E{len(elements) + 1}")
+        if etype in ("beam", "truss") and e.get("section_id") is None:
+            problems.append(f"Element {eid!r} needs section_id")
+            continue
+        fields = {k: v for k, v in e.items() if k not in ("type", "id")}
+        elements.append((TrussElement if etype == "truss" else BeamElement)(id=eid, **fields))
+
+    has_explicit_dim = "dimension" in model_data and model_data["dimension"] is not None
+    non_zero_z_nodes = [n for n in nodes if abs(n.z) > 1e-9]
+    if has_explicit_dim:
+        explicit_dim = str(model_data["dimension"]).strip().upper()
+        if explicit_dim == "2D":
+            if non_zero_z_nodes:
+                bad_ids = [n.id for n in non_zero_z_nodes[:5]]
+                problems.append(
+                    f"dimension='2D' but nodes {bad_ids} have z != 0"
+                )
+            is_3d = False
+        elif explicit_dim == "3D":
+            is_3d = True
+        else:
+            problems.append(f"Invalid dimension {model_data['dimension']!r}; must be '2D' or '3D'")
+            is_3d = bool(non_zero_z_nodes)
+    else:
+        is_3d = bool(non_zero_z_nodes)
+        if not is_3d:
+            applied.append(
+                AppliedDefault(
+                    name="dimension",
+                    value="2D",
+                    source="all nodes at z = 0: plane frame in X-Y with Y vertical (struct_core convention); give dimension='3D' for a horizontal grid",
+                )
+            )
 
     # 5. Parse Supports
     supports: List[Support] = []
+    allowed_sup_keys = {
+        "node_id", "fixity", "name",
+        "ux", "uy", "uz", "rx", "ry", "rz",
+        "kx", "ky", "kz", "krx", "kry", "krz",
+    }
     for sp in model_data.get("supports", []):
         if isinstance(sp, Support):
             supports.append(sp)
         elif isinstance(sp, dict):
+            if "node_id" not in sp or sp["node_id"] is None:
+                problems.append("Support definition is missing required 'node_id'")
+                continue
             nid = sp["node_id"]
+            unknown = set(sp.keys()) - allowed_sup_keys
+            if unknown:
+                problems.append(f"Support for node {nid!r} contains unknown key(s): {sorted(unknown)}")
+                continue
+
             fixity = str(sp.get("fixity", "")).lower()
-            if fixity == "pinned":
-                supports.append(Support.pinned(node_id=nid))
-            elif fixity in ("fixed", "fixed_3d") or (sp.get("ux") and sp.get("uy") and sp.get("rz")):
-                supports.append(Support.fixed(node_id=nid))
+            if fixity in ("fixed_3d", "fixed"):
+                sup = Support.fixed_3d(node_id=nid) if (is_3d or fixity == "fixed_3d") else Support.fixed(node_id=nid)
+            elif fixity in ("pinned_3d", "pinned"):
+                sup = Support.pinned_3d(node_id=nid) if (is_3d or fixity == "pinned_3d") else Support.pinned(node_id=nid)
+            elif fixity in ("roller", "roller_2d"):
+                sup = Support.roller(node_id=nid)
+            elif fixity:
+                problems.append(f"Unknown support fixity {fixity!r} for node {nid!r}")
+                continue
             else:
-                supports.append(Support(
+                sup = Support(
                     node_id=nid,
-                    ux=bool(sp.get("ux", True)),
-                    uy=bool(sp.get("uy", True)),
-                    rz=bool(sp.get("rz", fixity == "fixed")),
+                    ux=bool(sp.get("ux", False)),
+                    uy=bool(sp.get("uy", False)),
                     uz=bool(sp.get("uz", False)),
-                ))
+                    rx=bool(sp.get("rx", False)),
+                    ry=bool(sp.get("ry", False)),
+                    rz=bool(sp.get("rz", False)),
+                )
+            for k_attr in ("kx", "ky", "kz", "krx", "kry", "krz"):
+                if k_attr in sp and sp[k_attr] is not None:
+                    setattr(sup, k_attr, float(sp[k_attr]))
+            if "name" in sp and sp["name"] is not None:
+                sup.name = str(sp["name"])
+            supports.append(sup)
 
-    units_raw = model_data.get("units")
-    parsed_u = parse_units(units_raw) if units_raw else None
-
-    return StructuralModel(
+    if problems:
+        raise ModelInputError("; ".join(problems))
+    dim = "3D" if is_3d else "2D"
+    v_axis = "Z" if is_3d else "Y"
+    model = StructuralModel(
+        dimension=dim,
+        vertical_axis=v_axis,
         nodes=nodes,
         elements=elements,
         materials=materials,
         sections=sections,
         supports=supports,
-        units=parsed_u,
     )
+    errors = validate_structural_model(model, raise_error=False)
+    if errors:
+        raise ModelInputError("; ".join(errors))
+    return model, applied
+
+
+def _material_summary(material: Any) -> Dict[str, Any]:
+    """The design-relevant properties of a material, for tool results (model units)."""
+    summary: Dict[str, Any] = {"id": material.id, "type": material.type, "E": material.E}
+    for attr in ("fc", "fy", "fu", "unit_weight"):
+        value = getattr(material, attr, None)
+        if value is not None:
+            summary[attr] = value
+    return summary
 
 
 def create_frame_model(
-    num_bays: int = 2,
-    bay_width: float = 5.0,
-    num_stories: int = 2,
-    story_height: float = 3.0,
+    num_bays: Optional[int] = None,
+    bay_width: Optional[float] = None,
+    num_stories: Optional[int] = None,
+    story_height: Optional[float] = None,
     *,
+    fc: float,
+    fy: Optional[float] = None,
+    fyt: Optional[float] = None,
+    unit_weight: Optional[float] = None,
+    cover: Optional[float] = None,
+    bays_x: Optional[int] = None,
+    bays_y: Optional[int] = None,
+    bay_width_x: Optional[float] = None,
+    bay_width_y: Optional[float] = None,
+    bay_widths_x: Optional[List[float]] = None,
+    bay_widths_y: Optional[List[float]] = None,
     title: Optional[str] = None,
     author: Optional[str] = None,
-    units: Optional[Union[str, Any, dict]] = "kN, m",
+    units: Optional[Union[str, Any, dict]] = None,
     dimension: str = "2d",
-    bay_widths: Optional[List[float]] = None,
     story_heights: Optional[List[float]] = None,
     support_type: str = "fixed",
-    col_b: float = 0.4,
-    col_h: float = 0.4,
-    beam_b: float = 0.3,
-    beam_h: float = 0.5,
-    fc_kpa: float = 27580.0,
-    rho_kg_m3: float = 2400.0,
+    col_b: Optional[float] = None,
+    col_h: Optional[float] = None,
+    beam_b: Optional[float] = None,
+    beam_h: Optional[float] = None,
 ) -> ToolResult:
     """
-    Generate a complete, fully connected structural frame model (2D or 3D).
-    Automatically creates all grid nodes, columns, beams, supports, materials, and sections.
+    Generate a complete, fully connected reinforced-concrete frame model (2D or 3D): grid nodes, columns, beams,
+    supports, the concrete and reinforcing-steel materials, and the column and beam sections that own them.
+
+    Geometry is required: the X bays (``bay_widths_x``, or a count ``bays_x`` / ``num_bays`` with a spacing
+    ``bay_width_x`` / ``bay_width``), in 3D the Y bays likewise (``bay_widths_y``, or ``bays_y`` with ``bay_width_y`` /
+    ``bay_width``), and the stories (``story_heights``, or ``num_stories`` with ``story_height``). Lengths, including
+    the section sizes and ``cover``, are in the model length unit.
+
+    Materials: ``fc`` (concrete f'c) is required; ``fy`` (longitudinal bars), ``fyt`` (stirrups and ties),
+    ``unit_weight`` (concrete) and ``cover`` (clear cover) take their defaults when omitted (Grade 60, fyt = fy,
+    150 pcf, 1.5 in), and the result lists every default applied. Stresses and unit weights are strictly in the model
+    units. Omitted section sizes are trial sizes (0.45 m columns, 0.30 x 0.50 m beams, in the model unit).
     """
     try:
-        active_units = parse_units(units) if units is not None else None
-        # Determine bay coordinates along X
-        if bay_widths and len(bay_widths) > 0:
-            x_coords = [0.0]
-            for w in bay_widths:
-                x_coords.append(x_coords[-1] + float(w))
-            num_bays = len(bay_widths)
+        applied: List[Any] = []
+        if units is None:
+            active_units = parse_units(defaults.UNITS.value)
+            applied.append(defaults.UNITS.record())
         else:
-            x_coords = [float(i * bay_width) for i in range(num_bays + 1)]
+            active_units = parse_units(units)
+        is_3d = str(dimension or "2d").lower() == "3d"
+        missing = []
+        if not bay_widths_x and ((bays_x if bays_x is not None else num_bays) is None
+                                 or (bay_width_x if bay_width_x is not None else bay_width) is None):
+            missing.append("X bays (bay_widths_x, or bays_x / num_bays with bay_width_x / bay_width)")
+        if is_3d and not bay_widths_y and ((bays_y if bays_y is not None else num_bays) is None
+                                           or (bay_width_y if bay_width_y is not None else bay_width) is None):
+            missing.append("Y bays (bay_widths_y, or bays_y / num_bays with bay_width_y / bay_width)")
+        if not story_heights and (num_stories is None or story_height is None):
+            missing.append("stories (story_heights, or num_stories with story_height)")
+        if missing:
+            return ToolResult.failure("create_frame_model", AgentError(
+                error_type="invalid_input",
+                message="create_frame_model needs the frame geometry; missing: " + "; ".join(missing) + "."))
 
-        # Determine story elevations along Y (or Z)
+        sizes = {"col_b": col_b, "col_h": col_h, "beam_b": beam_b, "beam_h": beam_h}
+        if sizes["col_b"] is None and sizes["col_h"] is None:
+            val = float(defaults.TRIAL_COLUMN_SIZE.in_units(active_units))
+            sizes["col_b"] = val
+            sizes["col_h"] = val
+            applied.append(defaults.TRIAL_COLUMN_SIZE.record(applies_to="COL", model_units=active_units))
+        else:
+            for key in ("col_b", "col_h"):
+                if sizes[key] is None:
+                    val = float(defaults.TRIAL_COLUMN_SIZE.in_units(active_units))
+                    sizes[key] = val
+                    applied.append(defaults.TRIAL_COLUMN_SIZE.record(applies_to=f"COL.{key}", model_units=active_units))
+
+        for key, default_obj in [("beam_b", defaults.TRIAL_BEAM_WIDTH), ("beam_h", defaults.TRIAL_BEAM_DEPTH)]:
+            if sizes[key] is None:
+                sizes[key] = float(default_obj.in_units(active_units))
+                applied.append(default_obj.record(applies_to="BEAM", model_units=active_units))
+        col_b, col_h, beam_b, beam_h = sizes["col_b"], sizes["col_h"], sizes["beam_b"], sizes["beam_h"]
+
+        # Materials: concrete and reinforcing steel (the transverse grade only when it differs)
+        concrete, concrete_defaults = concrete_material(
+            "CONCRETE", fc=fc, units=active_units, unit_weight=unit_weight)
+        rebar, rebar_defaults = rebar_material(
+            "REBAR", units=active_units, fy=fy)
+        materials = [concrete, rebar]
+        applied += concrete_defaults + rebar_defaults
+        transverse_id = rebar.id
+        if fyt is not None and abs(fyt - rebar.fy) > 1e-9 * rebar.fy:
+            transverse, transverse_defaults = rebar_material(
+                "REBAR_TRANSVERSE", units=active_units, fy=fyt)
+            materials.append(transverse)
+            applied += transverse_defaults
+            transverse_id = transverse.id
+        elif fyt is None:
+            applied.append(AppliedDefault(name="fyt", value="fy", unit=None,
+                                          source="transverse bars of the longitudinal grade", applies_to=rebar.id))
+        if cover is None:
+            cover = defaults.COVER.in_units(active_units)
+            applied.append(defaults.COVER.record(model_units=active_units))
+        check_realistic("cover", cover, active_units)
+        rc = dict(material_id=concrete.id, rebar_material_id=rebar.id, transverse_rebar_material_id=transverse_id,
+                  cover=cover)
+        materials_summary = [_material_summary(m) for m in materials]
+
+        # Determine bay coordinates along X
+        if bay_widths_x:
+            x_coords = [0.0]
+            for w in bay_widths_x:
+                x_coords.append(x_coords[-1] + float(w))
+            eff_bays_x = len(bay_widths_x)
+        else:
+            eff_bays_x = bays_x if bays_x is not None else num_bays
+            bw_x = bay_width_x if bay_width_x is not None else bay_width
+            x_coords = [float(i * bw_x) for i in range(eff_bays_x + 1)]
+
+        # Determine story elevations along Y (2D) or Z (3D)
         if story_heights and len(story_heights) > 0:
-            y_coords = [0.0]
+            elev_coords = [0.0]
             for h in story_heights:
-                y_coords.append(y_coords[-1] + float(h))
+                elev_coords.append(elev_coords[-1] + float(h))
             num_stories = len(story_heights)
         else:
-            y_coords = [float(j * story_height) for j in range(num_stories + 1)]
+            elev_coords = [float(j * story_height) for j in range(num_stories + 1)]
+        y_coords = elev_coords
 
-        # 2. Materials & Sections
-        mat_id = "Concrete_4ksi"
-        materials = [
-            ElasticMaterial(
-                id=mat_id,
-                E=float(57000.0 * (fc_kpa * 0.145038)**0.5 * 6.89476) if fc_kpa else 24800000.0,
-                nu=0.2,
-                rho=rho_kg_m3,
-            )
-        ]
-        col_sec_id = f"Col_{int(col_b*1000)}x{int(col_h*1000)}"
-        beam_sec_id = f"Beam_{int(beam_b*1000)}x{int(beam_h*1000)}"
+        # 2. Sections, each with its concrete, bars and cover. Stable section IDs: resizing keeps the ID, so it must
+        # not encode the dimensions
+        col_sec_id, beam_sec_id = "COL", "BEAM"
         sections = [
-            RectangularSection(id=col_sec_id, b=col_b, h=col_h),
-            RectangularSection(id=beam_sec_id, b=beam_b, h=beam_h),
+            RectangularSection(id=col_sec_id, b=col_b, h=col_h, **rc),
+            RectangularSection(id=beam_sec_id, b=beam_b, h=beam_h, **rc),
         ]
 
-        if str(dimension or "2d").lower() == "3d":
+        if is_3d:
             # 3D Building Frame: X and Y are floor plan, Z is vertical elevation
-            bays_x = num_bays
-            bays_y = num_bays
-            z_coords = y_coords
-            y_coords_plan = x_coords
+            eff_bays_y = bays_y if bays_y is not None else num_bays
+            if bay_widths_y and len(bay_widths_y) > 0:
+                y_coords_plan = [0.0]
+                for w in bay_widths_y:
+                    y_coords_plan.append(y_coords_plan[-1] + float(w))
+                eff_bays_y = len(bay_widths_y)
+            else:
+                bw_y = bay_width_y if bay_width_y is not None else bay_width
+                y_coords_plan = [float(iy * bw_y) for iy in range(eff_bays_y + 1)]
+
+            bays_x = eff_bays_x
+            bays_y = eff_bays_y
+            z_coords = elev_coords
 
             nodes: List[Node] = []
             node_map_3d: Dict[tuple, int] = {}
@@ -251,7 +508,6 @@ def create_frame_model(
                                 name=f"Col X{ix+1}Y{iy+1} Story{s_idx+1}",
                                 start_node=node_map_3d[(ix, iy, s_idx)],
                                 end_node=node_map_3d[(ix, iy, s_idx + 1)],
-                                material_id=mat_id,
                                 section_id=col_sec_id,
                             )
                         )
@@ -267,7 +523,6 @@ def create_frame_model(
                                 name=f"Beam X{ix+1} GridY{iy+1} Story{s_idx}",
                                 start_node=node_map_3d[(ix, iy, s_idx)],
                                 end_node=node_map_3d[(ix + 1, iy, s_idx)],
-                                material_id=mat_id,
                                 section_id=beam_sec_id,
                             )
                         )
@@ -283,12 +538,13 @@ def create_frame_model(
                                 name=f"Beam Y{iy+1} GridX{ix+1} Story{s_idx}",
                                 start_node=node_map_3d[(ix, iy, s_idx)],
                                 end_node=node_map_3d[(ix, iy + 1, s_idx)],
-                                material_id=mat_id,
                                 section_id=beam_sec_id,
                             )
                         )
 
             model = StructuralModel(
+                dimension="3D",
+                vertical_axis="Z",
                 nodes=nodes,
                 elements=elements,
                 materials=materials,
@@ -301,9 +557,10 @@ def create_frame_model(
             project = Project(model=model)
             project.metadata.title = project_title
             if active_units:
-                project.metadata.units = active_units
+                project.units = active_units
             if author:
                 project.metadata.author = author
+            project.defaults_applied = list(applied)
 
             return ToolResult.success(
                 "create_frame_model",
@@ -316,6 +573,10 @@ def create_frame_model(
                     "n_columns": (bays_x + 1) * (bays_y + 1) * num_stories,
                     "n_beams": (bays_x * (bays_y + 1) + bays_y * (bays_x + 1)) * num_stories,
                     "n_supports": len(supports),
+                    "section_ids": {"columns": col_sec_id, "beams": beam_sec_id},
+                    "materials": materials_summary,
+                    "cover": cover,
+                    "defaults_applied": [d.model_dump() for d in applied],
                     "bays_x": bays_x,
                     "bays_y": bays_y,
                     "stories": num_stories,
@@ -333,8 +594,8 @@ def create_frame_model(
 
         # 1. Grid Nodes & Ground Supports
         for j in range(num_stories + 1):
-            for i in range(num_bays + 1):
-                nid = j * (num_bays + 1) + i + 1
+            for i in range(eff_bays_x + 1):
+                nid = j * (eff_bays_x + 1) + i + 1
                 node_map[(i, j)] = nid
                 nodes.append(Node(id=nid, x=x_coords[i], y=y_coords[j], z=0.0))
                 if j == 0:
@@ -347,7 +608,7 @@ def create_frame_model(
         elements: List[BeamElement] = []
         # Vertical Columns
         for j in range(num_stories):
-            for i in range(num_bays + 1):
+            for i in range(eff_bays_x + 1):
                 cid = f"C_{i+1}_{j+1}"
                 elements.append(
                     BeamElement(
@@ -355,14 +616,13 @@ def create_frame_model(
                         name=f"Column Bay {i+1} Story {j+1}",
                         start_node=node_map[(i, j)],
                         end_node=node_map[(i, j + 1)],
-                        material_id=mat_id,
                         section_id=col_sec_id,
                     )
                 )
 
         # Horizontal Beams
         for j in range(1, num_stories + 1):
-            for i in range(num_bays):
+            for i in range(eff_bays_x):
                 bid = f"B_{i+1}_{j}"
                 elements.append(
                     BeamElement(
@@ -370,12 +630,13 @@ def create_frame_model(
                         name=f"Beam Bay {i+1} Level {j}",
                         start_node=node_map[(i, j)],
                         end_node=node_map[(i + 1, j)],
-                        material_id=mat_id,
                         section_id=beam_sec_id,
                     )
                 )
 
         model = StructuralModel(
+            dimension="2D",
+            vertical_axis="Y",
             nodes=nodes,
             elements=elements,
             materials=materials,
@@ -385,13 +646,14 @@ def create_frame_model(
             units=active_units,
         )
 
-        project_title = title or f"{num_bays}-Bay {num_stories}-Story Frame"
+        project_title = title or f"{eff_bays_x}-Bay {num_stories}-Story Frame"
         project = Project(model=model)
         project.metadata.title = project_title
         if active_units:
-            project.metadata.units = active_units
+            project.units = active_units
         if author:
             project.metadata.author = author
+        project.defaults_applied = list(applied)
 
         return ToolResult.success(
             "create_frame_model",
@@ -401,16 +663,22 @@ def create_frame_model(
                 "units": active_units.short_label if active_units else "kN, m",
                 "n_nodes": len(nodes),
                 "n_elements": len(elements),
-                "n_columns": (num_bays + 1) * num_stories,
-                "n_beams": num_bays * num_stories,
+                "n_columns": (eff_bays_x + 1) * num_stories,
+                "n_beams": eff_bays_x * num_stories,
                 "n_supports": len(supports),
-                "bays": num_bays,
+                "section_ids": {"columns": col_sec_id, "beams": beam_sec_id},
+                "materials": materials_summary,
+                "cover": cover,
+                "defaults_applied": [d.model_dump() for d in applied],
+                "bays": eff_bays_x,
                 "stories": num_stories,
                 "total_height": y_coords[-1],
                 "total_width": x_coords[-1],
             },
             next_suggested_stage="MODEL_CREATED",
         )
+    except ValueError as exc:  # an input outside its realistic range, or another invalid value
+        return ToolResult.failure("create_frame_model", AgentError(error_type="invalid_input", message=str(exc)))
     except Exception as exc:
         return ToolResult.failure(
             "create_frame_model",
@@ -422,12 +690,45 @@ def create_frame_model(
         )
 
 
+def _model_check(tool: str, model: StructuralModel) -> Optional[ToolResult]:
+    """A failure for elements or supports on undefined nodes (minimax C04 built a model of one element between two
+    nonexistent nodes, reported as a success), else None."""
+    node_ids = {str(n.id) for n in model.nodes}
+    dangling = sorted({str(n) for e in model.elements for n in (e.start_node, e.end_node) if str(n) not in node_ids}
+                      | {str(s.node_id) for s in model.supports if str(s.node_id) not in node_ids})
+    if dangling:
+        return ToolResult.failure(tool, AgentError(
+            error_type="invalid_input",
+            message=f"Elements or supports refer to nodes that are not defined: {dangling[:8]}. Define every node in "
+                    f"'nodes' (id, x, y, z); the model was not changed.",
+        ))
+    return None
+
+
+def _parse_or_fail(
+    tool: str,
+    data: Dict[str, Any],
+    units: Any,
+) -> Tuple[Optional[StructuralModel], List[Any], Optional[ToolResult]]:
+    """``parse_model_dict`` for a tool: (model, defaults applied, None), or (None, [], failure) naming the problems."""
+    try:
+        model, applied = parse_model_dict(data, units)
+    except ValueError as exc:
+        return None, [], ToolResult.failure(tool, AgentError(
+            error_type="invalid_input",
+            message=f"{exc}. The model was not changed.",
+            possible_causes=["Define every material ('concrete' with fc, 'rebar' with fy, or E), every section with "
+                             "its material_id, and every element with its section_id."]))
+    return model, applied, None
+
+
 def create_project(
     structural_model: Optional[Union[StructuralModel, Dict[str, Any]]] = None,
     *,
     title: Optional[str] = None,
     author: Optional[str] = None,
     units: Optional[Union[str, Any, dict]] = None,
+    dimension: Optional[str] = None,
     model: Optional[Dict[str, Any]] = None,
     nodes: Optional[List[Dict[str, Any]]] = None,
     elements: Optional[List[Dict[str, Any]]] = None,
@@ -441,30 +742,44 @@ def create_project(
     or individual geometry lists (nodes, elements, materials, sections, supports).
     """
     model_obj: Optional[StructuralModel] = None
+    given: Optional[Dict[str, Any]] = None
+    applied: List[Any] = []
 
     # 1. StructuralModel directly supplied
     if isinstance(structural_model, StructuralModel):
         model_obj = structural_model
     # 2. Model dictionary passed via structural_model or model parameter
     elif isinstance(structural_model, dict):
-        model_obj = parse_model_dict(structural_model)
+        given = structural_model
     elif isinstance(model, dict):
-        model_obj = parse_model_dict(model)
+        given = model
     # 3. Direct geometry lists supplied as kwargs
-    elif nodes or elements:
-        model_dict = {
+    elif nodes or elements or materials or sections or supports:
+        given = {
             "nodes": nodes or [],
             "elements": elements or [],
             "materials": materials or [],
             "sections": sections or [],
             "supports": supports or [],
         }
-        model_obj = parse_model_dict(model_dict)
     # 4. Default empty model
     else:
         model_obj = StructuralModel()
+    if given is not None:
+        if dimension is not None and "dimension" not in given:
+            given["dimension"] = dimension
+        model_obj, applied, refused = _parse_or_fail("create_project", given, units)
+        if refused is not None:
+            return refused
+    elif dimension is not None:
+        model_obj.dimension = "3D" if str(dimension).upper() == "3D" else "2D"
+        model_obj.vertical_axis = "Z" if model_obj.dimension == "3D" else "Y"
+    refused = _model_check("create_project", model_obj)
+    if refused is not None:
+        return refused
 
     project = Project(model=model_obj)
+    project.defaults_applied = list(applied)
     if title:
         project.metadata.title = title
     if author:
@@ -472,11 +787,9 @@ def create_project(
 
     if units is not None:
         active_u = parse_units(units) if isinstance(units, (str, dict)) else units
-        project.metadata.units = active_u
-        if project.model:
-            project.model.units = active_u
+        project.units = active_u
     elif model_obj and getattr(model_obj, "units", None):
-        project.metadata.units = model_obj.units
+        project.units = model_obj.units
 
     return ToolResult.success(
         "create_project",
@@ -488,50 +801,12 @@ def create_project(
             "n_nodes": len(model_obj.nodes),
             "n_elements": len(model_obj.elements),
             "n_supports": len(model_obj.supports),
+            "materials": [_material_summary(m) for m in model_obj.materials],
+            "defaults_applied": [d.model_dump() for d in applied],
         },
         next_suggested_stage="MODEL_CREATED",
     )
 
-
-def build_structural_model(
-    project: Optional[Project] = None,
-    *,
-    nodes: Optional[List[Dict[str, Any]]] = None,
-    elements: Optional[List[Dict[str, Any]]] = None,
-    materials: Optional[List[Dict[str, Any]]] = None,
-    sections: Optional[List[Dict[str, Any]]] = None,
-    supports: Optional[List[Dict[str, Any]]] = None,
-    title: Optional[str] = None,
-) -> ToolResult:
-    """
-    Construct or populate a structural model from structured node/element/support JSON.
-    """
-    model_dict = {
-        "nodes": nodes or [],
-        "elements": elements or [],
-        "materials": materials or [],
-        "sections": sections or [],
-        "supports": supports or [],
-    }
-    new_model = parse_model_dict(model_dict)
-
-    if project is None:
-        project = Project(model=new_model)
-        if title:
-            project.metadata.title = title
-    else:
-        project.model = new_model
-
-    return ToolResult.success(
-        "build_structural_model",
-        data={
-            "project": project,
-            "n_nodes": len(new_model.nodes),
-            "n_elements": len(new_model.elements),
-            "n_supports": len(new_model.supports),
-        },
-        next_suggested_stage="MODEL_CREATED",
-    )
 
 
 def create_model_from_plan_draft(
@@ -559,7 +834,8 @@ def create_model_from_plan_draft(
                 ),
             )
 
-        compiled_project = build_project_from_draft(draft_obj, existing_project=project)
+        applied: List[Any] = []
+        compiled_project = build_project_from_draft(draft_obj, existing_project=project, applied=applied)
 
         return ToolResult.success(
             "create_model_from_plan_draft",
@@ -570,8 +846,11 @@ def create_model_from_plan_draft(
                 "n_elements": len(compiled_project.model.elements),
                 "n_supports": len(compiled_project.model.supports),
                 "n_stories": len(draft_obj.stories),
+                "section_ids": sorted({str(e.section_id) for e in compiled_project.model.elements}),
                 "units": compiled_project.metadata.units.label,
                 "story_elevations": compiled_project.model.story_elevations,
+                "materials": [_material_summary(m) for m in compiled_project.model.materials],
+                "defaults_applied": [d.model_dump() for d in applied],
             },
             next_suggested_stage="MODEL_CREATED",
         )
@@ -692,21 +971,22 @@ def modify_project(
     mutator : callable, optional
         A callable taking `StructuralModel` and returning the modified model.
     sections : list of dict, optional
-        Cross-sections to update or create. Each dict specifies:
-        - 'id': section identifier (e.g. 'Col_350x350' or 'Col_1')
-        - 'b': width in meters
-        - 'h': depth in meters
+        Cross-sections to update or create (lengths in the model length unit). Each dict specifies:
+        - 'id': section identifier (e.g. 'COL' or 'Col_1')
+        - 'b', 'h' (rectangular), 'd' (circular), or 'A', 'I3', ... (general)
+        - 'material_id': the section's material (required for a new section; a section owns its material)
+        - 'rebar_material_id', 'transverse_rebar_material_id', 'cover': reinforcement of a concrete section
+        An existing section keeps every property that is not given.
     member_assignments : list of dict, optional
-        Reassign structural elements to different sections or materials:
+        Reassign structural elements to different sections:
         - 'element_ids': list of member IDs (e.g. ['C1', 'C2']) or single ID ('C1')
-        - 'section_id': target section ID
-        - 'material_id': optional target material ID
+        - 'section_id': target section ID (to change a member's material, give it a section of that material)
     materials : list of dict, optional
-        Materials to update or create:
+        Materials to update or create, strictly in the model units:
         - 'id': material identifier
-        - 'E': Young's modulus (kPa)
-        - 'fc_kpa': concrete f'c (kPa) to auto-compute E if E is omitted
-        - 'rho': density (kg/m3)
+        - concrete: 'type': 'concrete', 'fc' (required), optional 'E' (default from f'c), 'nu', 'unit_weight'
+        - reinforcing steel: 'type': 'rebar', optional 'fy', 'fu', 'E', 'unit_weight' (default Grade 60)
+        - other: 'E' (required), optional 'nu', 'unit_weight'
 
     Returns
     -------
@@ -728,6 +1008,8 @@ def modify_project(
             new_model = mutator(project.model)
             if new_model is not None:
                 project.model = new_model
+            _refresh_self_weight(project)
+            _refresh_seismic_loads(project)
         except Exception as exc:
             return ToolResult.failure(
                 "modify_project",
@@ -743,99 +1025,73 @@ def modify_project(
             next_suggested_stage="MODEL_CREATED",
         )
 
-    # 2. Declarative modifications
+    # 2. Declarative modifications. IDs are checked before anything changes: a new section or material
+    # must be assigned to members in the same call, otherwise it would change nothing in the model.
+    units = project.metadata.units
+    materials = [dict(m) for m in materials or [] if isinstance(m, dict)]
+    problem = _check_modification_ids(project.model, sections, member_assignments, materials)
+    if problem:
+        return ToolResult.failure("modify_project", AgentError(error_type="invalid_input", message=problem))
+
+    # All or nothing: a refused modification leaves the model as it was
+    snapshot = project.model.model_copy(deep=True)
+
+    def refuse(message: str) -> ToolResult:
+        project.model = snapshot
+        return ToolResult.failure("modify_project", AgentError(error_type="invalid_input", message=message))
+
+    # Materials first: sections defined in this call may name them
+    updated_materials: List[Dict[str, Any]] = []
+    applied: List[Any] = []
+    for m_data in materials:
+        current = next((m for m in project.model.materials if str(m.id) == str(m_data.get("id"))), None)
+        try:
+            new_mat, used = _material_from_dict(_merged_material_input(current, m_data), units)
+        except ValueError as exc:
+            return refuse(str(exc))
+        existing = [i for i, m in enumerate(project.model.materials) if str(m.id) == str(new_mat.id)]
+        if existing:
+            project.model.materials[existing[0]] = new_mat
+        else:
+            project.model.materials.append(new_mat)
+        applied += used
+        updated_materials.append(_material_summary(new_mat))
+
     updated_sections: List[Dict[str, Any]] = []
-    if sections:
-        for s_data in sections:
-            if not isinstance(s_data, dict):
-                continue
-            sec_id = str(s_data.get("id", "")).strip()
-            if not sec_id:
-                continue
-
-            existing_idx = None
-            existing_s = None
-            for i, s_obj in enumerate(project.model.sections):
-                if getattr(s_obj, "id", None) == sec_id:
-                    existing_idx = i
-                    existing_s = s_obj
-                    break
-
-            # Infer or read section shape type
-            sec_type = str(s_data.get("type", "")).lower().strip()
-            if not sec_type:
-                if "d" in s_data or "diameter" in s_data or isinstance(existing_s, CircularSection):
-                    sec_type = "circular"
-                elif "A" in s_data or "area" in s_data or "I3" in s_data or "Iz" in s_data or isinstance(existing_s, GeneralSection):
-                    sec_type = "general"
-                else:
-                    sec_type = "rectangular"
-
-            new_sec = None
-            sec_summary: Dict[str, Any] = {"id": sec_id, "type": sec_type}
-
-            if sec_type == "circular":
-                d_val = s_data.get("d") if s_data.get("d") is not None else s_data.get("diameter")
-                if d_val is not None:
-                    d = float(d_val)
-                elif isinstance(existing_s, CircularSection):
-                    d = float(existing_s.d)
-                else:
-                    d = 0.40
-                if d <= 0.0:
-                    continue
-                new_sec = CircularSection(id=sec_id, d=round(d, 4))
-                sec_summary["d"] = round(d, 4)
-
-            elif sec_type == "general":
-                a_val = s_data.get("A") if s_data.get("A") is not None else s_data.get("area")
-                i3_val = s_data.get("I3") if s_data.get("I3") is not None else s_data.get("Iz")
-                i2_val = s_data.get("I2") if s_data.get("I2") is not None else s_data.get("Iy")
-                j_val = s_data.get("J")
-                as2_val = s_data.get("As2") if s_data.get("As2") is not None else s_data.get("Ay")
-                as3_val = s_data.get("As3") if s_data.get("As3") is not None else s_data.get("Az")
-
-                A = float(a_val if a_val is not None else (getattr(existing_s, "A", 0.0) or 0.01))
-                I3 = float(i3_val if i3_val is not None else (getattr(existing_s, "I3", 0.0) or 0.001))
-                I2 = float(i2_val if i2_val is not None else (getattr(existing_s, "I2", 0.0) or 0.0))
-                J = float(j_val if j_val is not None else (getattr(existing_s, "J", 0.0) or 0.0))
-                As2 = float(as2_val) if as2_val is not None else getattr(existing_s, "As2", None)
-                As3 = float(as3_val) if as3_val is not None else getattr(existing_s, "As3", None)
-
-                if A <= 0.0 or I3 <= 0.0:
-                    continue
-                new_sec = GeneralSection(id=sec_id, A=round(A, 6), I3=round(I3, 8), I2=round(I2, 8), J=round(J, 8), As2=As2, As3=As3)
-                sec_summary.update({"A": round(A, 6), "I3": round(I3, 8), "I2": round(I2, 8), "J": round(J, 8)})
-
-            else:  # rectangular
-                b_val = s_data.get("b") if s_data.get("b") is not None else s_data.get("width")
-                h_val = s_data.get("h") if s_data.get("h") is not None else (s_data.get("depth") or s_data.get("height"))
-
-                if b_val is not None:
-                    b = float(b_val)
-                elif isinstance(existing_s, RectangularSection):
-                    b = float(existing_s.b)
-                else:
-                    b = 0.35
-
-                if h_val is not None:
-                    h = float(h_val)
-                elif isinstance(existing_s, RectangularSection):
-                    h = float(existing_s.h)
-                else:
-                    h = 0.45
-
-                if b <= 0.0 or h <= 0.0:
-                    continue
-                new_sec = RectangularSection(id=sec_id, b=round(b, 4), h=round(h, 4))
-                sec_summary.update({"b": round(b, 4), "h": round(h, 4)})
-
-            if new_sec is not None:
-                if existing_idx is not None:
-                    project.model.sections[existing_idx] = new_sec
-                else:
-                    project.model.sections.append(new_sec)
-                updated_sections.append(sec_summary)
+    for s_data in sections or []:
+        if not isinstance(s_data, dict) or not str(s_data.get("id", "")).strip():
+            continue
+        sec_id = str(s_data["id"]).strip()
+        existing_idx = next((i for i, x in enumerate(project.model.sections) if str(x.id) == sec_id), None)
+        existing_s = project.model.sections[existing_idx] if existing_idx is not None else None
+        given = {k: v for k, v in s_data.items() if v is not None}
+        kept = existing_s.model_dump() if existing_s is not None else {}
+        shape = given.get("type") or ("circular" if "d" in given else "general" if "A" in given
+                                      else "rectangular" if {"b", "h"} & set(given) else None)
+        if existing_s is not None and shape is not None and shape != existing_s.type:
+            # A new shape: the section keeps its materials and cover, not the old dimensions
+            kept = {k: v for k, v in kept.items()
+                    if k in ("id", "name", "material_id", "rebar_material_id", "transverse_rebar_material_id", "cover")
+                    and (shape != "general" or k in ("id", "name", "material_id"))}
+        merged = {**kept, **given}
+        if existing_s is not None and "type" not in given:
+            merged["type"] = shape or existing_s.type
+        try:
+            check_realistic("cover", given.get("cover"), units)
+        except ValueError as exc:
+            return refuse(f"Section {sec_id!r}: {exc}")
+        try:
+            new_sec = _section_from_dict(merged)
+        except (ModelInputError, ValueError) as exc:
+            return refuse(f"Section {sec_id!r}: {exc}. Give its dimensions (b, h / d / A, I3) and material_id.")
+        sec_summary = {k: v for k, v in new_sec.model_dump().items() if v is not None and k != "name"}
+        # A resize to the current shape and size changes nothing; say so in the result
+        sec_summary["changed"] = existing_s is None or existing_s.model_dump() != new_sec.model_dump()
+        if existing_idx is not None:
+            project.model.sections[existing_idx] = new_sec
+        else:
+            project.model.sections.append(new_sec)
+        updated_sections.append(sec_summary)
 
     reassigned_elements: List[str] = []
     if member_assignments:
@@ -846,45 +1102,18 @@ def modify_project(
                 e_ids = [e_ids]
             elif not isinstance(e_ids, list):
                 e_ids = []
-
             target_sec = assign.get("section_id")
-            target_mat = assign.get("material_id")
-
             for eid in e_ids:
                 elem = elems_by_id.get(eid)
-                if elem:
-                    if target_sec:
-                        elem.section_id = str(target_sec)
-                    if target_mat:
-                        elem.material_id = str(target_mat)
+                if elem and target_sec:
+                    elem.section_id = str(target_sec)
                     reassigned_elements.append(eid)
 
-    updated_materials: List[Dict[str, Any]] = []
-    if materials:
-        for m_data in materials:
-            mat_id = str(m_data.get("id", "")).strip()
-            if not mat_id:
-                continue
-            E = float(m_data.get("E", 0.0) or m_data.get("elastic_modulus", 0.0))
-            fc_kpa = float(m_data.get("fc_kpa", 0.0) or m_data.get("fc", 0.0))
-            rho = float(m_data.get("rho", 0.0) or m_data.get("density", 2400.0))
-            if not E and fc_kpa > 0:
-                fc_mpa = fc_kpa / 1000.0
-                E = 4700.0 * math.sqrt(fc_mpa) * 1000.0
-            E = E or 25000000.0
-
-            existing_idx = None
-            for i, existing_m in enumerate(project.model.materials):
-                if getattr(existing_m, "id", None) == mat_id:
-                    existing_idx = i
-                    break
-
-            new_mat = ElasticMaterial(id=mat_id, E=round(E, 1), rho=rho)
-            if existing_idx is not None:
-                project.model.materials[existing_idx] = new_mat
-            else:
-                project.model.materials.append(new_mat)
-            updated_materials.append({"id": mat_id, "E": E, "rho": rho})
+    # Concrete sections take the default reinforcement (Grade 60, 1.5 in cover) for what is not given
+    applied += complete_concrete_sections(project.model.materials, project.model.sections, units)
+    errors = [e for e in validate_structural_model(project.model, raise_error=False) if "missing" in e or "rebar" in e]
+    if errors:
+        return refuse("The modification leaves the model inconsistent: " + "; ".join(errors))
 
     if not updated_sections and not reassigned_elements and not updated_materials:
         return ToolResult.failure(
@@ -895,6 +1124,35 @@ def modify_project(
             ),
         )
 
+    refreshed = _refresh_self_weight(project)
+    lateral = _refresh_seismic_loads(project)
+    overridden = set()
+    for m_data in materials or []:
+        mid = str(m_data.get("id", ""))
+        for k, v in m_data.items():
+            if v is not None:
+                overridden.add((k, mid))
+                if k == "unit_weight":
+                    overridden.add(("concrete unit_weight", mid))
+                    overridden.add(("rebar unit_weight", mid))
+    for s_data in sections or []:
+        if isinstance(s_data, dict):
+            sid = str(s_data.get("id", ""))
+            if s_data.get("cover") is not None:
+                overridden.add(("cover", sid))
+                overridden.add(("cover", None))
+    prev_defaults = [
+        d for d in (getattr(project, "defaults_applied", None) or [])
+        if (d.name, d.applies_to) not in overridden
+    ]
+    seen_def = {(d.name, d.applies_to) for d in applied}
+    merged_def = [d for d in prev_defaults if (d.name, d.applies_to) not in seen_def] + list(applied)
+    project.defaults_applied = merged_def
+    section_usage = _usage(project.model, "section_id")
+    for sec_summary in updated_sections:
+        sec_summary["n_elements"] = section_usage.get(sec_summary["id"], 0)
+    from .loads import _case_total
+
     return ToolResult.success(
         "modify_project",
         data={
@@ -902,10 +1160,124 @@ def modify_project(
             "sections_updated": updated_sections,
             "elements_reassigned": reassigned_elements,
             "materials_updated": updated_materials,
+            "defaults_applied": [d.model_dump() for d in applied],
+            "self_weight_updated_cases": refreshed,
+            # Updated resultants (model force unit): the dead load W and the regenerated ELF base shear
+            "total_dead_load": {cid: _case_total(project, cid) for cid in refreshed},
+            **({"seismic_loads": lateral} if lateral is not None else {}),
             "summary": f"Modified project: {len(updated_sections)} section(s), {len(reassigned_elements)} member reassignment(s), {len(updated_materials)} material(s).",
+            **({"note": "Sections " + ", ".join(s["id"] for s in updated_sections if not s["changed"])
+                        + " already had these dimensions; the model did not change. Do not repeat this call: "
+                          "continue with the next workflow step (run_analysis, then run_design to check these "
+                          "sections). Only if a design check failed, resize with different dimensions (e.g. a "
+                          "deeper beam h for beam flexure)."}
+               if updated_sections and not reassigned_elements and not updated_materials
+               and not any(s["changed"] for s in updated_sections) else {}),
         },
         next_suggested_stage="MODEL_CREATED",
     )
+
+
+def _usage(model: StructuralModel, attr: str) -> Dict[str, int]:
+    """Number of elements referencing each value of an element attribute (e.g. 'section_id')."""
+    counts: Dict[str, int] = {}
+    for e in model.elements:
+        key = getattr(e, attr, None)
+        if key is not None:
+            counts[str(key)] = counts.get(str(key), 0) + 1
+    return counts
+
+
+def _check_modification_ids(
+    model: StructuralModel,
+    sections: Optional[List[Dict[str, Any]]],
+    member_assignments: Optional[List[Dict[str, Any]]],
+    materials: Optional[List[Dict[str, Any]]],
+) -> Optional[str]:
+    """Reason the declarative modification would not do what it says, or None."""
+    element_ids = {str(e.id) for e in model.elements}
+    known_sections = {str(s.id) for s in model.sections}
+    new_sections = {str(s.get("id", "")).strip() for s in sections or [] if isinstance(s, dict)} - known_sections
+    assigned = set()
+    for assign in member_assignments or []:
+        if assign.get("material_id") is not None:
+            return ("Members take a material through their section: give the section its material_id (or assign "
+                    "the members a section of that material).")
+        e_ids = assign.get("element_ids") or assign.get("elements") or assign.get("element_id") or []
+        e_ids = [e_ids] if isinstance(e_ids, str) else list(e_ids)
+        missing = [str(e) for e in e_ids if str(e) not in element_ids]
+        if missing:
+            return f"Unknown element IDs {missing[:5]}; the model's elements are e.g. {sorted(element_ids)[:6]}."
+        target = assign.get("section_id")
+        if target is None:
+            continue
+        if str(target) not in known_sections and str(target) not in new_sections:
+            return f"member_assignments refers to section '{target}', which neither exists nor is defined in this call."
+        assigned.add(str(target))
+    unused = sorted(i for i in new_sections - assigned if i)
+    if unused:
+        usage = ", ".join(f"'{k}' ({n} elements)" for k, n in sorted(_usage(model, "section_id").items()))
+        return (f"Section {unused} does not exist and no member is assigned to it, so the model would not change. "
+                f"Update an existing section by its ID ({usage}), or add member_assignments for the new one.")
+    known_materials = {str(m.id) for m in model.materials}
+    referenced = {str(v) for s in sections or [] if isinstance(s, dict)
+                  for v in (s.get("material_id"), s.get("rebar_material_id"), s.get("transverse_rebar_material_id"))
+                  if v is not None}
+    referenced |= {str(v) for sec in model.sections
+                   for v in (sec.material_id, getattr(sec, "rebar_material_id", None),
+                             getattr(sec, "transverse_rebar_material_id", None)) if v is not None}
+    concrete = {str(m.id) for m in model.materials if getattr(m, "type", None) == "concrete"}
+    concrete |= {str(m.get("id")) for m in materials or [] if str(m.get("type", "")).lower() == "concrete"}
+    bare = any(str(sec.material_id) in concrete and getattr(sec, "rebar_material_id", None) is None
+               for sec in model.sections)  # its bars will be the new rebar material (complete_concrete_sections)
+    new_unused = sorted(str(m.get("id")) for m in materials or []
+                        if str(m.get("id")) not in known_materials and str(m.get("id")) not in referenced
+                        and not (bare and str(m.get("type", "")).lower() == "rebar"))
+    if new_unused:
+        return (f"Material {new_unused} is new and no section uses it, so the model would not change. Give a section "
+                f"its material_id (or rebar_material_id) in the same call.")
+    return None
+
+
+def _refresh_seismic_loads(project: Project) -> Optional[Dict[str, Any]]:
+    """
+    Regenerate ELF story forces after a member change: they are proportional to the seismic weight,
+    which includes the member self-weight. Returns a summary, or None when no ELF loads exist.
+    """
+    basis = getattr(project, "seismic_basis", None)
+    if basis is None or basis.procedure != "elf":
+        return None
+    if not basis.elf_inputs:
+        return {"updated": False,
+                "reason": "The ELF loads were generated from a SeismicParameters object or a custom mass source; "
+                          "call apply_lateral_loads again so the story forces follow the new seismic weight."}
+    from .loads import apply_lateral_loads
+
+    res = apply_lateral_loads(project, **basis.elf_inputs)
+    if not res.ok:
+        return {"updated": False, "reason": res.error.message if res.error else "apply_lateral_loads failed"}
+    return {"updated": True, "seismic_base_shear": res.data.get("seismic_base_shear"),
+            "case_ids": res.data.get("seismic_case_ids") or [res.data.get("seismic_case_id")]}
+
+
+def _refresh_self_weight(project: Project) -> List[str]:
+    """
+    Recompute the stored member self-weight loads (``is_self_weight``) from the current sections and
+    materials, so analyses after a resize carry the new weight. Returns the updated load case IDs.
+    """
+    from struct_load.engine.self_weight import calculate_self_weight
+
+    units = getattr(project.metadata, "units", None)
+    refreshed: List[str] = []
+    for lc in project.model.load_cases:
+        if not any(getattr(dl, "is_self_weight", False) for dl in lc.element_loads):
+            continue
+        fresh = calculate_self_weight(model=project.model, load_case_id=lc.id, units=units)
+        lc.element_loads = [dl for dl in lc.element_loads if not getattr(dl, "is_self_weight", False)] + list(
+            fresh.element_loads
+        )
+        refreshed.append(lc.id)
+    return refreshed
 
 
 def set_project_units(
@@ -932,7 +1304,7 @@ def set_project_units(
         if convert_existing:
             convert_project_units(project, u_target, in_place=True)
         else:
-            project.metadata.units = u_target
+            project.units = u_target
         return ToolResult.success(
             "set_project_units",
             data={"units": u_target.short_label, "converted": convert_existing},

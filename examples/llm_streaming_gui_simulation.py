@@ -74,8 +74,13 @@ class MockMultiTurnAgent(BaseLLMProvider):
             )
         elif self.turn == 2:
             return LLMResponse(
-                content="[Imported geometry. Performing ASCE 7-22 gravity load calculations and tributary area distribution]",
+                content="[Imported geometry. The file gives no f'c: setting the 28,000 kPa concrete. Performing ASCE 7-22 gravity load calculations and tributary area distribution]",
                 tool_calls=[
+                    ToolCallRequest(
+                        id="c2a",
+                        name="modify_project",
+                        arguments={"materials": [{"id": "CONC", "type": "concrete", "fc": 28000.0}]},
+                    ),
                     ToolCallRequest(
                         id="c2",
                         name="apply_gravity_loads",

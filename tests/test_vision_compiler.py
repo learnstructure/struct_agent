@@ -22,6 +22,7 @@ class TestVisionCompiler(unittest.TestCase):
     def test_regular_grid_compilation(self):
         """Test regular 2x2 bay, 2-story building plan compilation."""
         draft = FloorPlanDraft(
+            fc=27580.0,
             title="Office Building Frame",
             grids_x=[
                 GridLineDraft(label="1", direction="X", spacing_to_next=6.0),
@@ -72,13 +73,14 @@ class TestVisionCompiler(unittest.TestCase):
         self.assertIn("LIVE", case_ids)
 
         # Verify combinations
-        combo_ids = [c.id for c in proj.model.load_combinations]
-        self.assertIn("COMB1", combo_ids)
-        self.assertIn("COMB2", combo_ids)
+        combo_names = [c.name for c in proj.model.load_combinations]
+        self.assertIn("1.4D", combo_names)
+        self.assertTrue(any("1.2D" in n and "1.6L" in n for n in combo_names))
 
     def test_custom_columns_and_beams(self):
         """Test L-shaped framing with explicit columns and beams."""
         draft = FloorPlanDraft(
+            fc=27580.0,
             title="L-Shaped Frame",
             grids_x=[
                 GridLineDraft(label="1", direction="X", spacing_to_next=6.0),
@@ -126,6 +128,7 @@ class TestVisionCompiler(unittest.TestCase):
     def test_fem3d_static_analysis_on_compiled_project(self):
         """Run 3D FEM analysis on the compiled project and verify non-zero equilibrium."""
         draft = FloorPlanDraft(
+            fc=27580.0,
             title="FEA Verified Model",
             grids_x=[
                 GridLineDraft(label="1", direction="X", spacing_to_next=6.0),

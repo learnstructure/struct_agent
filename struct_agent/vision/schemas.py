@@ -19,7 +19,7 @@ class GridLineDraft(BaseModel):
 
     label: str = Field(description="Grid mark label, e.g. '1', '2', '3' or 'A', 'B', 'C'")
     direction: Literal["X", "Y"] = Field(description="Direction of grid line or axis perpendicular to it")
-    spacing_to_next: float = Field(default=0.0, description="Span distance to the next adjacent grid line in meters")
+    spacing_to_next: float = Field(default=0.0, description="Span distance to the next adjacent grid line in the draft's length unit")
     coordinate: Optional[float] = Field(default=None, description="Explicit coordinate offset along axis (optional)")
 
 
@@ -30,8 +30,8 @@ class StoryDraft(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     name: str = Field(description="Story name, e.g. 'Ground Floor', 'Story 1', 'Roof'")
-    height: float = Field(description="Floor-to-floor vertical height in meters")
-    elevation: Optional[float] = Field(default=None, description="Absolute elevation Z in meters (optional)")
+    height: float = Field(description="Floor-to-floor vertical height in the draft's length unit")
+    elevation: Optional[float] = Field(default=None, description="Absolute elevation Z in the draft's length unit (optional)")
 
 
 class ColumnDraft(BaseModel):
@@ -42,8 +42,8 @@ class ColumnDraft(BaseModel):
 
     grid: Tuple[str, str] = Field(description="Grid intersection identifier, e.g. ['A', '1'] or ['1', 'A']")
     section: Optional[str] = Field(default=None, description="Section mark or name, e.g. 'C450x450'")
-    b: Optional[float] = Field(default=0.45, description="Column width b in meters")
-    h: Optional[float] = Field(default=0.45, description="Column depth h in meters")
+    b: Optional[float] = Field(default=None, description="Column width b in model length units (None = draft default)")
+    h: Optional[float] = Field(default=None, description="Column depth h in model length units (None = draft default)")
     stories: Optional[List[str]] = Field(default=None, description="List of story names where this column exists (None = all)")
 
 
@@ -56,8 +56,8 @@ class BeamDraft(BaseModel):
     from_grid: Tuple[str, str] = Field(description="Start grid intersection, e.g. ['A', '1']")
     to_grid: Tuple[str, str] = Field(description="End grid intersection, e.g. ['A', '2']")
     section: Optional[str] = Field(default=None, description="Section mark or name, e.g. 'B300x500'")
-    b: Optional[float] = Field(default=0.30, description="Beam width b in meters")
-    h: Optional[float] = Field(default=0.50, description="Beam depth h in meters")
+    b: Optional[float] = Field(default=None, description="Beam width b in model length units (None = draft default)")
+    h: Optional[float] = Field(default=None, description="Beam depth h in model length units (None = draft default)")
     stories: Optional[List[str]] = Field(default=None, description="List of story names where this beam exists (None = all floor levels)")
 
 
@@ -75,9 +75,17 @@ class FloorPlanDraft(BaseModel):
     columns: List[ColumnDraft] = Field(default_factory=list, description="Explicit column placements (empty = auto-populate all grid intersections)")
     beams: List[BeamDraft] = Field(default_factory=list, description="Explicit beam lines (empty = auto-connect grid lines)")
     support_type: Literal["Fixed", "Pinned"] = Field(default="Fixed", description="Base boundary restraint type")
-    concrete_fc: float = Field(default=30.0, description="Characteristic concrete compressive strength in MPa")
-    dead_load: float = Field(default=12.0, description="Typical floor dead load on beams in kN/m")
-    live_load: float = Field(default=8.0, description="Typical floor live load on beams in kN/m")
+    default_col_b: Optional[float] = Field(default=None, description="Section of columns without b (model length units; None = 0.45 m)")
+    default_col_h: Optional[float] = Field(default=None, description="Section of columns without h (model length units; None = 0.45 m)")
+    default_beam_b: Optional[float] = Field(default=None, description="Section of beams without b (model length units; None = 0.30 m)")
+    default_beam_h: Optional[float] = Field(default=None, description="Section of beams without h (model length units; None = 0.50 m)")
+    fc: Optional[float] = Field(default=None, description="Concrete f'c in the draft's stress unit; required to build the model")
+    fy: Optional[float] = Field(default=None, description="Longitudinal reinforcement fy in draft units (default Grade 60)")
+    fyt: Optional[float] = Field(default=None, description="Transverse reinforcement fyt in draft units (default fy)")
+    unit_weight: Optional[float] = Field(default=None, description="Concrete unit weight in the draft's weight-density unit (default 150 pcf)")
+    cover: Optional[float] = Field(default=None, description="Clear cover in model length units (default 1.5 in)")
+    dead_load: float = Field(default=0.0, description="Line dead load on every beam (force/length; 0 = none, use apply_gravity_loads)")
+    live_load: float = Field(default=0.0, description="Line live load on every beam (force/length; 0 = none, use apply_gravity_loads)")
     dead_case: str = Field(default="DEAD", description="Dead load case name")
     live_case: str = Field(default="LIVE", description="Live load case name")
     missing_information: List[str] = Field(default_factory=list, description="List of missing parameters requiring user clarification (e.g. story heights)")
@@ -140,8 +148,13 @@ def normalize_floor_plan_dict(raw: dict) -> FloorPlanDraft:
     # 4. Columns
     col_raw = raw.get("columns") or []
     cols: List[ColumnDraft] = []
-    default_col_b = float(raw.get("default_col_b") or 0.45)
-    default_col_h = float(raw.get("default_col_h") or 0.45)
+
+    def _opt(key: str, *alts: str) -> Optional[float]:
+        for k in (key, *alts):
+            if raw.get(k) is not None:
+                return float(raw[k])
+        return None
+
     for item in col_raw:
         if isinstance(item, ColumnDraft):
             cols.append(item)
@@ -156,16 +169,14 @@ def normalize_floor_plan_dict(raw: dict) -> FloorPlanDraft:
                 ColumnDraft(
                     grid=g,
                     section=item.get("section"),
-                    b=float(item.get("section_b") or item.get("b") or default_col_b),
-                    h=float(item.get("section_h") or item.get("h") or default_col_h),
+                    b=item.get("section_b") or item.get("b"),
+                    h=item.get("section_h") or item.get("h"),
                 )
             )
 
     # 5. Beams
     beam_raw = raw.get("beams") or []
     beams: List[BeamDraft] = []
-    default_beam_b = float(raw.get("default_beam_b") or 0.30)
-    default_beam_h = float(raw.get("default_beam_h") or 0.50)
     for item in beam_raw:
         if isinstance(item, BeamDraft):
             beams.append(item)
@@ -181,8 +192,8 @@ def normalize_floor_plan_dict(raw: dict) -> FloorPlanDraft:
                     from_grid=fg,
                     to_grid=tg,
                     section=item.get("section"),
-                    b=float(item.get("section_b") or item.get("b") or default_beam_b),
-                    h=float(item.get("section_h") or item.get("h") or default_beam_h),
+                    b=item.get("section_b") or item.get("b"),
+                    h=item.get("section_h") or item.get("h"),
                 )
             )
 
@@ -202,7 +213,15 @@ def normalize_floor_plan_dict(raw: dict) -> FloorPlanDraft:
         columns=cols,
         beams=beams,
         support_type=sup,
-        concrete_fc=float(raw.get("concrete_fc") or 30.0),
-        dead_load=float(raw.get("dead_load") or 12.0),
-        live_load=float(raw.get("live_load") or 8.0),
+        default_col_b=_opt("default_col_b"),
+        default_col_h=_opt("default_col_h"),
+        default_beam_b=_opt("default_beam_b"),
+        default_beam_h=_opt("default_beam_h"),
+        fc=_opt("fc"),
+        fy=_opt("fy"),
+        fyt=_opt("fyt"),
+        unit_weight=_opt("unit_weight"),
+        cover=_opt("cover"),
+        dead_load=_opt("dead_load") or 0.0,
+        live_load=_opt("live_load") or 0.0,
     )

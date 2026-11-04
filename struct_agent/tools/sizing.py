@@ -1,134 +1,129 @@
 """
 Preliminary member sizing heuristics for struct_agent.
 
-Provides rule-of-thumb structural sizing so an LLM can bootstrap a complete,
-analyzable structural model from bare geometry alone.
+Gives a frame's sections rule-of-thumb starting sizes, so an LLM can bootstrap an analysable model from
+bare geometry.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Optional
-from struct_core import (
-    ElasticMaterial,
-    RectangularSection,
-)
+from typing import Any, Dict, List, Optional, Tuple
+
+from struct_core import RectangularSection, classify_frame_members, conversion_factor, parse_units
+
 from .base import AgentError, ToolResult
+from .model import modify_project
+
+# Rules of thumb in metres: (dimension step, least beam width, least beam depth, least column size)
+_METRIC_RULES = (0.05, 0.25, 0.30, 0.35)
+_US_RULES = (0.0508, 0.254, 0.3048, 0.3556)  # 2 in steps; 10 in, 12 in, 14 in
+_METRIC_LENGTHS = {"m", "cm", "mm"}
+# Sections created for members that have none (stable IDs, as create_frame_model uses)
+_SIZED_ROLES = ("column", "beam")
+
+
+def _ceil_to(value: float, step: float) -> float:
+    return math.ceil(value / step - 1e-9) * step
+
+
+def _element_lengths(model: Any) -> Dict[Any, float]:
+    nodes = {n.id: n for n in model.nodes}
+    lengths = {}
+    for el in model.elements:
+        a, b = nodes.get(el.start_node), nodes.get(el.end_node)
+        if a is not None and b is not None:
+            lengths[el.id] = math.dist((a.x, a.y, getattr(a, "z", 0.0)), (b.x, b.y, getattr(b, "z", 0.0)))
+    return lengths
 
 
 def preliminary_sizing(
     project: Any,
     *,
-    material_id: str = "Concrete_4ksi",
-    fc_kpa: float = 27580.0,  # ~4000 psi
-    rho_kg_m3: float = 2400.0,
-    min_beam_width: float = 0.25,
-    min_col_dim: float = 0.35,
+    min_beam_width: Optional[float] = None,
+    min_col_dim: Optional[float] = None,
 ) -> ToolResult:
     """
-    Apply engineering rules-of-thumb to size RC beams and columns based on member spans.
+    Rule-of-thumb starting sizes for the frame's rectangular beam and column sections.
 
-    - Beams: Depth h ≈ L / 14 (rounded up to nearest 50 mm), width b ≈ 0.55 * h (min 250 mm).
-    - Columns: Dimension b = h ≈ max(350 mm, story_height / 10).
+    - Beam sections: depth h = longest span / 14 (at least 0.30 m / 12 in), width b = 0.55 h (at least
+      ``min_beam_width``), with b <= h.
+    - Column sections: square, b = h = tallest story / 10 (at least ``min_col_dim``).
+
+    Each section is sized for the longest member assigned to it and keeps its ID, material, reinforcement and
+    cover; only b and h change. Dimensions are rounded up to 0.05 m (2 in for US customary models). Members are classified as beams and columns by
+    their orientation (``struct_core.classify_frame_members``, any vertical axis). The sizes are applied
+    through ``modify_project``, so member self-weight and ELF story forces are regenerated.
 
     Parameters
     ----------
-    project : Project
-        The project container holding the structural model.
-    material_id : str
-        ID for default concrete material.
-    fc_kpa : float
-        Specified compressive strength f'c (kPa).
-    rho_kg_m3 : float
-        Unit mass density (kg/m³).
-    min_beam_width : float
-        Minimum allowable beam width (m).
-    min_col_dim : float
-        Minimum column cross-sectional dimension (m).
-
-    Returns
-    -------
-    ToolResult
-        Result containing created sections and summary statistics.
+    min_beam_width, min_col_dim : float, optional
+        Least beam width and column dimension, in the model's length unit (defaults 0.25 m and 0.35 m,
+        or 10 in and 14 in).
     """
     if project is None or getattr(project, "model", None) is None:
-        return ToolResult.failure(
-            "preliminary_sizing",
-            AgentError(
-                error_type="missing_input",
-                message="No valid Project provided to preliminary_sizing.",
-            ),
-        )
+        return ToolResult.failure("preliminary_sizing", AgentError(
+            error_type="missing_input", message="No valid Project provided to preliminary_sizing."))
 
     model = project.model
-    nodes_map = {n.id: n for n in model.nodes}
+    units = parse_units(getattr(project.metadata, "units", None) or "kN, m")
+    to_m = conversion_factor(units, "kN, m", "length")
+    step, beam_b_min, beam_h_min, col_min = _METRIC_RULES if units.length in _METRIC_LENGTHS else _US_RULES
+    beam_b_min = beam_b_min if min_beam_width is None else float(min_beam_width) * to_m
+    col_min = col_min if min_col_dim is None else float(min_col_dim) * to_m
 
-    # Ensure material exists
-    if not any(m.id == material_id for m in model.materials):
-        # E = 4700 * sqrt(fc_psi) * 6.89476 kPa ≈ 24,800,000 kPa for 4000 psi
-        e_kpa = 4700.0 * math.sqrt(fc_kpa / 6.89476) * 6.89476
-        model.materials.append(
-            ElasticMaterial(id=material_id, E=round(e_kpa, 1), rho=rho_kg_m3)
-        )
+    roles = classify_frame_members(model)
+    lengths = _element_lengths(model)
+    sections = {s.id: s for s in model.sections}
+    framing = [el for el in model.elements if roles.get(el.id) in _SIZED_ROLES and el.id in lengths]
 
-    sections_created = {}
-    beams_sized = 0
-    cols_sized = 0
+    no_section = sorted(str(el.id) for el in framing if el.section_id not in sections)
+    if no_section:
+        return ToolResult.failure("preliminary_sizing", AgentError(
+            error_type="invalid_input",
+            message=f"Members {no_section[:6]} reference sections that do not exist; define their sections (with a "
+                    f"material) first."))
 
-    for elem in model.elements:
-        if getattr(elem, "type", "") != "beam":
+    governing: Dict[str, Tuple[str, float]] = {}  # section id -> (role, longest member in m)
+    mixed: List[str] = []
+    for el in framing:
+        role = roles[el.id]
+        sec_id = el.section_id
+        previous = governing.get(sec_id)
+        if previous is not None and previous[0] != role:
+            mixed.append(sec_id)
+        governing[sec_id] = (role, max(lengths[el.id] * to_m, previous[1] if previous else 0.0))
+    if mixed:
+        return ToolResult.failure("preliminary_sizing", AgentError(
+            error_type="invalid_input",
+            message=f"Sections {sorted(set(mixed))} are assigned to both beams and columns; give each its own section."))
+
+    sizes: List[Dict[str, Any]] = []
+    skipped: List[str] = []
+    for sec_id, (role, length) in governing.items():
+        existing = sections.get(sec_id)
+        if existing is not None and not isinstance(existing, RectangularSection):
+            skipped.append(sec_id)
             continue
+        if role == "beam":
+            h = _ceil_to(max(beam_h_min, length / 14.0), step)
+            b = min(_ceil_to(max(beam_b_min, 0.55 * h), step), h)
+        else:
+            h = b = _ceil_to(max(col_min, length / 10.0), step)
+        sizes.append({"id": sec_id, "role": role, "governing_length": round(length / to_m, 4),
+                      "b": round(b / to_m, 6), "h": round(h / to_m, 6)})
+    if not sizes:
+        return ToolResult.failure("preliminary_sizing", AgentError(
+            error_type="invalid_input", message="The model has no rectangular beam or column sections to size."))
 
-        n_i = nodes_map.get(elem.start_node)
-        n_j = nodes_map.get(elem.end_node)
-        if not n_i or not n_j:
-            continue
-
-        dx = n_j.x - n_i.x
-        dy = n_j.y - n_i.y
-        span = math.sqrt(dx * dx + dy * dy)
-
-        is_vertical = abs(dx) < 0.05 and abs(dy) > 0.05
-        is_horizontal = abs(dy) < 0.05 and abs(dx) > 0.05
-
-        if is_horizontal:
-            # Beam sizing: h ≈ L / 14 rounded up to nearest 0.05 m
-            h_raw = span / 14.0
-            h = max(0.30, math.ceil(h_raw * 20.0) / 20.0)
-            b_raw = h * 0.55
-            b = max(min_beam_width, math.ceil(b_raw * 20.0) / 20.0)
-
-            sec_id = f"Beam_{int(b*1000)}x{int(h*1000)}"
-            if sec_id not in sections_created:
-                sections_created[sec_id] = RectangularSection(id=sec_id, b=round(b, 2), h=round(h, 2))
-            elem.section_id = sec_id
-            elem.material_id = material_id
-            beams_sized += 1
-
-        elif is_vertical:
-            # Column sizing: b = h ≈ max(350 mm, H / 10)
-            dim_raw = max(min_col_dim, span / 10.0)
-            dim = math.ceil(dim_raw * 20.0) / 20.0
-
-            sec_id = f"Col_{int(dim*1000)}x{int(dim*1000)}"
-            if sec_id not in sections_created:
-                sections_created[sec_id] = RectangularSection(id=sec_id, b=round(dim, 2), h=round(dim, 2))
-            elem.section_id = sec_id
-            elem.material_id = material_id
-            cols_sized += 1
-
-    # Attach created sections to model
-    existing_sec_ids = {s.id for s in model.sections}
-    for sec_id, sec_obj in sections_created.items():
-        if sec_id not in existing_sec_ids:
-            model.sections.append(sec_obj)
-
-    return ToolResult.success(
-        "preliminary_sizing",
-        data={
-            "beams_sized": beams_sized,
-            "columns_sized": cols_sized,
-            "sections_created": list(sections_created.keys()),
-        },
-        next_suggested_stage="MODEL_CREATED",
+    applied = modify_project(
+        project,
+        sections=[{"id": s["id"], "b": s["b"], "h": s["h"]} for s in sizes],
     )
+    if not applied.ok:
+        return ToolResult.failure("preliminary_sizing", applied.error)
+    data = {key: value for key, value in applied.data.items() if key != "summary"}
+    data["sections_sized"] = sizes
+    if skipped:
+        data["skipped_sections"] = skipped  # circular or general sections keep their properties
+    return ToolResult.success("preliminary_sizing", data=data, next_suggested_stage="MODEL_CREATED")

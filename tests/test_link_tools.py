@@ -91,3 +91,55 @@ def test_import_sap2000_with_self_weight(fixtures_dir):
     dead_case = next(lc for lc in project.model.load_cases if lc.id == "DEAD")
     assert len(dead_case.element_loads) >= 1
     assert dead_case.include_self_weight is False
+
+
+def test_import_sap2000_allow_partial_import_flag(tmp_path):
+    """H3: allow_partial_import flag allows importing models with unsupported tables."""
+    s2k_text = (
+        'TABLE:  "PROGRAM CONTROL"\n'
+        '   ProgramName=SAP2000   Version=24.0.0   CurrUnits="KN, m, C"\n'
+        'TABLE:  "JOINT COORDINATES"\n'
+        '   Joint=1   CoordSys=GLOBAL   X=0   Y=0   Z=0\n'
+        'TABLE:  "OPTIONS - COLORS - DISPLAY"\n'
+        '   ColorType=Screen   Color=Black\n'
+        'TABLE:  "JOINT SPRING ASSIGNMENTS 1 - UNCOUPLED"\n'
+        '   Joint=1   CoordSys=GLOBAL   U1=1000   U2=0   U3=0\n'
+        'END TABLE DATA\n'
+    )
+    s2k_file = tmp_path / "with_spring.s2k"
+    s2k_file.write_text(s2k_text, encoding="utf-8")
+
+    # Default raises / fails
+    res_fail = import_from_sap2000(s2k_file, allow_partial_import=False)
+    assert not res_fail.ok
+    assert "unsupported table" in res_fail.error.message
+
+    # allow_partial_import=True succeeds
+    res_ok = import_from_sap2000(s2k_file, allow_partial_import=True)
+    assert res_ok.ok
+    assert "OPTIONS - COLORS - DISPLAY" in res_ok.data.get("ignored_tables", [])
+    assert any("JOINT SPRING ASSIGNMENTS" in msg for msg in res_ok.data.get("import_notes", []))
+
+
+def test_export_sap2000_allow_partial_export_flag(tmp_path):
+    """H3: allow_partial_export flag allows exporting models with support springs."""
+    from struct_core import ElasticMaterial, Node, Project, RectangularSection, StructuralModel, Support
+
+    nodes = [Node(id="1", x=0, y=0, z=0), Node(id="2", x=0, y=0, z=3)]
+    mat = ElasticMaterial(id="E1", E=3e7, nu=0.2)
+    sec = RectangularSection(id="S1", material_id="E1", b=0.3, h=0.3)
+    supports = [Support(node_id="1", ux=True, uy=True, uz=True, rx=True, ry=True, rz=True, ky=1000.0)]
+    model = StructuralModel(units="kN, m", nodes=nodes, materials=[mat], sections=[sec], supports=supports)
+    proj = Project(model=model, units="kN, m")
+
+    out_s2k = tmp_path / "spring_out.s2k"
+
+    # Default export fails
+    res_fail = export_to_sap2000(proj, output_path=out_s2k, allow_partial_export=False)
+    assert not res_fail.ok
+    assert "not supported for export" in res_fail.error.message
+
+    # allow_partial_export=True succeeds and reports dropped items
+    res_ok = export_to_sap2000(proj, output_path=out_s2k, allow_partial_export=True)
+    assert res_ok.ok
+    assert "dropped_items" in res_ok.data or "dropped_springs" in res_ok.data

@@ -7,13 +7,11 @@ FloorPlanDraft representations into mathematically exact struct_core.Project mod
 
 from __future__ import annotations
 
-import math
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from struct_core import (
     BeamElement,
     DistributedLoad,
-    ElasticMaterial,
     LoadCase,
     LoadCaseFactor,
     LoadCombination,
@@ -23,6 +21,7 @@ from struct_core import (
     RectangularSection,
     StructuralModel,
     Support,
+    conversion_factor,
     parse_units,
 )
 
@@ -83,9 +82,11 @@ def _find_grid_pair(
 def build_project_from_draft(
     draft: FloorPlanDraft,
     existing_project: Optional[Project] = None,
+    applied: Optional[List[Any]] = None,
 ) -> Project:
     """
-    Compile a FloorPlanDraft into an exact struct_core.Project.
+    Compile a FloorPlanDraft into an exact struct_core.Project. The draft must give the concrete f'c; the defaults
+    applied for what it omits (bars, cover, unit weight) are appended to ``applied`` when it is given.
 
     Features:
     - Exact nodal coordinates snapped along orthogonal or designated grid axes
@@ -99,6 +100,8 @@ def build_project_from_draft(
         raise ValueError("FloorPlanDraft requires at least one X grid and one Y grid.")
     if not draft.stories:
         raise ValueError("FloorPlanDraft requires at least one story level.")
+    if draft.fc is None:
+        raise ValueError("FloorPlanDraft requires the concrete f'c (fc, strictly in the draft's stress unit).")
 
     # 1. Resolve Grid System Coordinates
     coords_x, coords_y = _resolve_grid_axes(draft.grids_x, draft.grids_y)
@@ -117,24 +120,57 @@ def build_project_from_draft(
 
     num_levels = len(story_elevations)
 
+    from .. import defaults
+    from ..tools.materials import concrete_material, rebar_material
+    from ..tools.units_input import check_realistic
+
+    units = parse_units(draft.units)
+    used_defaults: List[AppliedDefault] = []
+    if "units" not in draft.model_fields_set:
+        used_defaults.append(defaults.UNITS.record())
+
+    # Section sizes for members without their own (0.45 m columns, 0.30 x 0.50 m beams in the draft's units)
+    col_b0 = draft.default_col_b if draft.default_col_b is not None else float(defaults.TRIAL_COLUMN_SIZE.in_units(units))
+    col_h0 = draft.default_col_h if draft.default_col_h is not None else float(defaults.TRIAL_COLUMN_SIZE.in_units(units))
+    beam_b0 = draft.default_beam_b if draft.default_beam_b is not None else float(defaults.TRIAL_BEAM_WIDTH.in_units(units))
+    beam_h0 = draft.default_beam_h if draft.default_beam_h is not None else float(defaults.TRIAL_BEAM_DEPTH.in_units(units))
+
+    if draft.default_col_b is None:
+        used_defaults.append(defaults.TRIAL_COLUMN_SIZE.record(applies_to="col_b", model_units=units))
+    if draft.default_col_h is None:
+        used_defaults.append(defaults.TRIAL_COLUMN_SIZE.record(applies_to="col_h", model_units=units))
+    if draft.default_beam_b is None:
+        used_defaults.append(defaults.TRIAL_BEAM_WIDTH.record(applies_to="beam_b", model_units=units))
+    if draft.default_beam_h is None:
+        used_defaults.append(defaults.TRIAL_BEAM_DEPTH.record(applies_to="beam_h", model_units=units))
+
+    mm = conversion_factor(units, "N, mm", "length")
+
+    def _sec_name(prefix: str, b: float, h: float, default: Tuple[float, float]) -> str:
+        # Members of the default size share the stable ID 'COL' / 'BEAM' (resizing keeps the ID, so it
+        # must not encode dimensions); explicitly sized groups are named by their size
+        if (b, h) == default:
+            return prefix
+        return f"{prefix}_{round(b * mm)}x{round(h * mm)}"
+
     # 3. Resolve Column Grid Intersections
     target_columns: List[Tuple[str, str, float, float, str]] = []
     if draft.columns:
         for c in draft.columns:
             gx, gy = _find_grid_pair(c.grid, coords_x, coords_y)
-            sec_name = c.section or f"COL_{int((c.b or 0.45)*1000)}x{int((c.h or 0.45)*1000)}"
-            target_columns.append((gx, gy, float(c.b or 0.45), float(c.h or 0.45), sec_name))
+            b, h = float(c.b if c.b is not None else col_b0), float(c.h if c.h is not None else col_h0)
+            target_columns.append((gx, gy, b, h, c.section or _sec_name("COL", b, h, (col_b0, col_h0))))
     else:
         # Default: columns at all grid intersections
         for gx in x_labels:
             for gy in y_labels:
-                target_columns.append((gx, gy, 0.45, 0.45, "COL_450x450"))
+                target_columns.append((gx, gy, col_b0, col_h0, "COL"))
 
     # 4. Initialize Project and Materials
     if existing_project is not None:
         proj = existing_project
         proj.metadata.title = draft.title
-        proj.metadata.units = parse_units(draft.units)
+        proj.units = parse_units(draft.units)
         proj.model = StructuralModel()
     else:
         proj = Project(
@@ -142,23 +178,38 @@ def build_project_from_draft(
             model=StructuralModel(),
         )
 
-    fc = float(draft.concrete_fc or 30.0)
-    E_conc = round(4700.0 * math.sqrt(fc) * 1000.0, 1)  # kPa (kN/m²)
-    mat_conc = ElasticMaterial(
-        id="CONC",
-        name=f"Concrete f'c={fc:.0f}MPa",
-        E=E_conc,
-        nu=0.20,
-        rho=2400.0,
-    )
-    proj.model.materials.append(mat_conc)
+    # Materials: concrete (f'c required) and reinforcing steel, in the draft units
+    concrete, used = concrete_material(
+        "CONC", fc=draft.fc, units=units,
+        unit_weight=draft.unit_weight)
+    used = list(used_defaults) + used
+    rebar, used_rebar = rebar_material("REBAR", units=units, fy=draft.fy)
+    proj.model.materials.extend([concrete, rebar])
+    used += used_rebar
+    transverse_id = rebar.id
+    if draft.fyt is not None:
+        transverse, used_transverse = rebar_material(
+            "REBAR_TRANSVERSE", units=units, fy=draft.fyt)
+        proj.model.materials.append(transverse)
+        used += used_transverse
+        transverse_id = transverse.id
+    cover = draft.cover
+    if cover is None:
+        cover = defaults.COVER.in_units(units)
+        used.append(defaults.COVER.record(model_units=units))
+    check_realistic("cover", cover, units)
+    if applied is not None:
+        applied.extend(used)
+    proj.defaults_applied = list(used)
+    reinforcement = dict(material_id=concrete.id, rebar_material_id=rebar.id,
+                         transverse_rebar_material_id=transverse_id, cover=cover)
 
     # Sections map
     created_sections: Dict[str, RectangularSection] = {}
 
     def _get_or_create_section(sec_id: str, b_val: float, h_val: float) -> str:
         if sec_id not in created_sections:
-            sec = RectangularSection(id=sec_id, name=sec_id, b=round(b_val, 4), h=round(h_val, 4))
+            sec = RectangularSection(id=sec_id, name=sec_id, b=round(b_val, 4), h=round(h_val, 4), **reinforcement)
             created_sections[sec_id] = sec
             proj.model.sections.append(sec)
         return sec_id
@@ -203,7 +254,6 @@ def build_project_from_draft(
                     start_node=node_id_map[bot_key],
                     end_node=node_id_map[top_key],
                     section_id=sec_id,
-                    material_id="CONC",
                 )
                 proj.model.elements.append(elem)
                 elem_counter += 1
@@ -215,8 +265,9 @@ def build_project_from_draft(
         for b_draft in draft.beams:
             g1x, g1y = _find_grid_pair(b_draft.from_grid, coords_x, coords_y)
             g2x, g2y = _find_grid_pair(b_draft.to_grid, coords_x, coords_y)
-            b_sec_name = b_draft.section or f"BEAM_{int((b_draft.b or 0.30)*1000)}x{int((b_draft.h or 0.50)*1000)}"
-            b_sec_id = _get_or_create_section(b_sec_name, float(b_draft.b or 0.30), float(b_draft.h or 0.50))
+            bb = float(b_draft.b if b_draft.b is not None else beam_b0)
+            bh = float(b_draft.h if b_draft.h is not None else beam_h0)
+            b_sec_id = _get_or_create_section(b_draft.section or _sec_name("BEAM", bb, bh, (beam_b0, beam_h0)), bb, bh)
 
             for lvl_idx in range(1, num_levels):
                 k1 = (g1x, g1y, lvl_idx)
@@ -228,14 +279,13 @@ def build_project_from_draft(
                         start_node=node_id_map[k1],
                         end_node=node_id_map[k2],
                         section_id=b_sec_id,
-                        material_id="CONC",
                     )
                     proj.model.elements.append(beam)
                     beam_elements.append(beam)
                     elem_counter += 1
     else:
         # Default: Framing beams connecting adjacent columns along X and Y grid lines
-        default_beam_sec = _get_or_create_section("BEAM_300x500", 0.30, 0.50)
+        default_beam_sec = _get_or_create_section("BEAM", beam_b0, beam_h0)
 
         for lvl_idx in range(1, num_levels):
             # Beams along X grid lines (for each gy, connect consecutive gx)
@@ -252,7 +302,6 @@ def build_project_from_draft(
                             start_node=node_id_map[k1],
                             end_node=node_id_map[k2],
                             section_id=default_beam_sec,
-                            material_id="CONC",
                         )
                         proj.model.elements.append(beam)
                         beam_elements.append(beam)
@@ -272,7 +321,6 @@ def build_project_from_draft(
                             start_node=node_id_map[k1],
                             end_node=node_id_map[k2],
                             section_id=default_beam_sec,
-                            material_id="CONC",
                         )
                         proj.model.elements.append(beam)
                         beam_elements.append(beam)
@@ -282,40 +330,32 @@ def build_project_from_draft(
     dead_case_id = draft.dead_case or "DEAD"
     live_case_id = draft.live_case or "LIVE"
 
-    lc_dead = LoadCase(id=dead_case_id, name="Dead Load")
-    lc_live = LoadCase(id=live_case_id, name="Live Load")
-
     dl_mag = float(draft.dead_load or 0.0)
     ll_mag = float(draft.live_load or 0.0)
 
+    created_cases: List[LoadCase] = []
     if dl_mag > 0:
+        lc_dead = LoadCase(id=dead_case_id, name="Dead Load", load_type="dead")
         for b in beam_elements:
             lc_dead.element_loads.append(
                 DistributedLoad(element_id=b.id, wz=-dl_mag)
             )
+        created_cases.append(lc_dead)
 
     if ll_mag > 0:
+        lc_live = LoadCase(id=live_case_id, name="Live Load", load_type="live")
         for b in beam_elements:
             lc_live.element_loads.append(
                 DistributedLoad(element_id=b.id, wz=-ll_mag)
             )
+        created_cases.append(lc_live)
 
-    proj.model.load_cases.extend([lc_dead, lc_live])
+    proj.model.load_cases.extend(created_cases)
 
     # 9. Standard ASCE 7 Factored Load Combinations
-    c1 = LoadCombination(
-        id="COMB1",
-        name="1.4D",
-        factors=[LoadCaseFactor(load_case_id=dead_case_id, factor=1.4)],
-    )
-    c2 = LoadCombination(
-        id="COMB2",
-        name="1.2D+1.6L",
-        factors=[
-            LoadCaseFactor(load_case_id=dead_case_id, factor=1.2),
-            LoadCaseFactor(load_case_id=live_case_id, factor=1.6),
-        ],
-    )
-    proj.model.load_combinations.extend([c1, c2])
+    if created_cases:
+        from struct_load import LoadGenerator
+        gen = LoadGenerator(units=proj.units)
+        gen.generate_combinations(proj)
 
     return proj

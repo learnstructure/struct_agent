@@ -170,7 +170,7 @@ def generate_drawings(
 
     target_case_id = design_case_id
     if target_case_id is None and getattr(project, "design_results", None):
-        target_case_id = next(iter(project.design_results.keys()))
+        target_case_id = list(project.design_results.keys())[-1]
 
     if not getattr(project, "design_results", None) or target_case_id not in project.design_results:
         if mode_type == "auto" and design_case_id is None:
@@ -194,11 +194,35 @@ def generate_drawings(
             next_suggested_stage="DESIGN_COMPLETE",
         )
 
-    detail_id = detailing_case_id or target_case_id
-    if not getattr(project, "detailing_results", None) or detail_id not in project.detailing_results:
-        if getattr(project, "detailing_results", None):
-            detail_id = next(iter(project.detailing_results.keys()))
-        elif mode_type == "auto" and design_case_id is None:
+    des_res = project.design_results[target_case_id]
+    from .model_state import is_current
+    if not is_current(project, des_res):
+        return ToolResult.failure(
+            "generate_drawings",
+            AgentError(
+                error_type="stale_result",
+                message=f"Design result '{target_case_id}' was computed before the latest model change. Run design again before generating drawings.",
+                possible_causes=["Model geometry, sections, or loads changed after design was run"],
+            ),
+            next_suggested_stage="DESIGN_COMPLETE",
+        )
+
+    if detailing_case_id is not None:
+        if not getattr(project, "detailing_results", None) or detailing_case_id not in project.detailing_results:
+            return ToolResult.failure(
+                "generate_drawings",
+                AgentError(
+                    error_type="invalid_input",
+                    message=f"Detailing case '{detailing_case_id}' does not exist; available: {sorted(getattr(project, 'detailing_results', {}).keys())}.",
+                ),
+            )
+        detail_id = detailing_case_id
+    else:
+        if getattr(project, "detailing_results", None) and target_case_id in project.detailing_results:
+            detail_id = target_case_id
+        elif getattr(project, "detailing_results", None):
+            detail_id = list(project.detailing_results.keys())[-1]
+        elif mode_type == "auto":
             return _render_framing_drawings(
                 project=project,
                 output_path=output_path,
@@ -214,7 +238,7 @@ def generate_drawings(
                 "generate_drawings",
                 AgentError(
                     error_type="workflow_error",
-                    message=f"No DetailingResult for case {detail_id!r}.",
+                    message=f"No DetailingResult found for design case '{target_case_id}'.",
                     possible_causes=["run_design must produce a DetailingResult"],
                 ),
             )
