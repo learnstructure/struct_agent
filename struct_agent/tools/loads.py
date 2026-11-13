@@ -23,8 +23,6 @@ def apply_gravity_loads(
     custom_live_load: Optional[float] = None,
     two_way: Optional[bool] = None,
     partition_weight: Optional[float] = None,
-    pressure_unit: Optional[str] = None,
-    length_unit: Optional[str] = None,
     allow_partial_floor: bool = False,
 ) -> ToolResult:
     """
@@ -47,7 +45,7 @@ def apply_gravity_loads(
     include_self_weight : bool
         Whether to calculate element self-weight from sections and density.
     custom_live_load : float, optional
-        Custom live load pressure override.
+        Custom live load pressure override, model pressure unit.
     two_way : bool, optional
         Explicitly force two-way floor panel distribution in 3D frames.
     partition_weight : float, optional
@@ -55,12 +53,8 @@ def apply_gravity_loads(
         unit. Defaults to the 10 psf (0.48 kPa) minimum for occupancies with a partition allowance;
         with ``custom_live_load`` it must be given to be included. Stored as the seismic-weight-only
         case 'PartitionWeight'.
-    pressure_unit : str, optional
-        Unit of superimposed_dead, custom_live_load, partition_weight (e.g. 'kPa', 'psf', 'ksf').
-        If None, assumed in model pressure units.
-    length_unit : str, optional
-        Unit of tributary_width (e.g. 'm', 'ft', 'in'). If None, assumed in model length units.
 
+    Every value is in the model's units (one unit rule: no tool takes a unit argument).
     Pressures above 50 kPa (about 1,040 psf) are rejected: no floor load is that large, so such a value
     is a unit mistake (e.g. 105 psf entered in a ksf model).
 
@@ -91,17 +85,9 @@ def apply_gravity_loads(
             ),
         )
 
-    from .units_input import to_model_units, unit_label
+    from .units_input import unit_label
 
     model_units = parse_units(getattr(project, "units", None) or getattr(project.metadata, "units", None) or defaults.UNITS.value)
-    try:
-        superimposed_dead = to_model_units(superimposed_dead, pressure_unit, "pressure", model_units)
-        custom_live_load = to_model_units(custom_live_load, pressure_unit, "pressure", model_units)
-        partition_weight = to_model_units(partition_weight, pressure_unit, "pressure", model_units)
-        tributary_width = to_model_units(tributary_width, length_unit, "length", model_units)
-    except ValueError as exc:
-        return ToolResult.failure("apply_gravity_loads", AgentError(error_type="invalid_input", message=str(exc)))
-
     pressures = {"superimposed_dead": superimposed_dead, "custom_live_load": custom_live_load,
                  "partition_weight": partition_weight}
     to_kpa = conversion_factor(model_units, "kN, m", "pressure")
@@ -203,7 +189,6 @@ def apply_lateral_loads(
     partition_cases: Optional[list[str]] = None,
     snow_cases: Optional[list[str]] = None,
     flat_roof_snow_pressure: float = 0.0,
-    length_unit: Optional[str] = None,
 ) -> ToolResult:
     """
     Calculate and apply ASCE 7 seismic (ELF) and/or wind (MWFRS) lateral forces to the structural model.
@@ -272,16 +257,9 @@ def apply_lateral_loads(
             error_type="invalid_input",
             message="No lateral load requested: give sds and sd1 (seismic ELF) or wind_speed (wind)."))
 
-    from .units_input import to_model_units
     from struct_core import parse_units
 
     model_units = parse_units(getattr(project, "units", None) or getattr(project.metadata, "units", None) or defaults.UNITS.value)
-    if tributary_width is not None and length_unit is not None:
-        try:
-            tributary_width = to_model_units(tributary_width, length_unit, "length", model_units)
-        except ValueError as exc:
-            return ToolResult.failure("apply_lateral_loads", AgentError(error_type="invalid_input", message=str(exc)))
-
     generator = LoadGenerator(units=model_units)
 
     try:
@@ -424,12 +402,10 @@ def apply_roof_loads(
     exposure_factor_ce: float = 1.0,
     thermal_factor_ct: float = 1.0,
     risk_category: Optional[str] = None,
-    pressure_unit: Optional[str] = None,
-    length_unit: Optional[str] = None,
-    area_unit: Optional[str] = None,
 ) -> ToolResult:
     """
-    Calculate and apply ASCE 7-22 Snow and/or Roof Live loads to roof framing beams.
+    Calculate and apply ASCE 7-22 Snow and/or Roof Live loads to roof framing beams (every value in the model's
+    units).
 
     ASCE 7-22 snow loads carry no importance factor; ``risk_category`` sets the minimum
     low-slope roof snow load (Table 7.3-4). For 2D frames, ``tributary_width`` is required;
@@ -462,24 +438,9 @@ def apply_roof_loads(
         risk_category = defaults.RISK_CATEGORY.value
         applied.append(defaults.RISK_CATEGORY.record())
 
-    from .units_input import to_model_units
     from struct_core import parse_units
 
     model_units = parse_units(getattr(project, "units", None) or getattr(project.metadata, "units", None) or defaults.UNITS.value)
-    try:
-        ground_snow_load = to_model_units(ground_snow_load, pressure_unit, "pressure", model_units)
-        roof_live_load = to_model_units(roof_live_load, pressure_unit, "pressure", model_units)
-        tributary_width = to_model_units(tributary_width, length_unit, "length", model_units)
-        tributary_area = to_model_units(tributary_area, area_unit, "area", model_units)
-    except ValueError as exc:
-        return ToolResult.failure(
-            "apply_roof_loads",
-            AgentError(
-                error_type="invalid_input",
-                message=str(exc),
-            ),
-        )
-
     try:
         generator = LoadGenerator(units=model_units)
         created = generator.apply_roof_loads(

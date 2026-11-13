@@ -47,7 +47,7 @@ def test_create_frame_model_needs_fc():
         create_frame_model(dimension="2d", bay_widths_x=[6.0], story_heights=[3.5])
 
 
-def test_run_design_reports_the_default_bearing_pressure_and_footing_cover():
+def test_run_design_reports_the_default_foundation_inputs():
     project = _frame()
     generate_load_combinations(project)
     assert run_analysis(project, analysis_case_id="ENV").ok
@@ -58,9 +58,13 @@ def test_run_design_reports_the_default_bearing_pressure_and_footing_cover():
     assert foundations["pressure_unit"] == "kPa"
     assert foundations["footing_cover"] == pytest.approx(3.0 * 0.0254)
     inputs = project.design_results["D"].inputs
-    assert {d["name"] for d in foundations["defaults_applied"]} == {"allowable_bearing_pressure", "footing_cover"}
-    assert {"allowable_bearing_pressure", "footing_cover", "fy", "cover", "E"} <= {d.name for d in inputs.defaults_applied}
+    assert foundations["soil_depth"] == pytest.approx(0.5) and foundations["soil_unit_weight"] == pytest.approx(18.0)
+    assert {d["name"] for d in foundations["defaults_applied"]} == {"allowable_bearing_pressure", "footing_cover",
+                                                                   "soil_depth", "soil_unit_weight"}
+    assert {"allowable_bearing_pressure", "footing_cover", "soil_depth", "soil_unit_weight", "fy", "cover", "E"} <= {
+        d.name for d in inputs.defaults_applied}
     assert inputs.allowable_bearing_pressure == pytest.approx(150.0)
+    assert inputs.soil_depth == pytest.approx(0.5) and inputs.soil_unit_weight == pytest.approx(18.0)
 
 
 def test_run_design_takes_a_given_bearing_pressure():
@@ -68,11 +72,12 @@ def test_run_design_takes_a_given_bearing_pressure():
     generate_load_combinations(project)
     assert run_analysis(project, analysis_case_id="ENV").ok
     res = run_design(project, design_case_id="D", analysis_case_id="ENV", allowable_bearing_pressure=200.0,
-                     footing_cover=0.075)
+                     footing_cover=0.075, soil_depth=0.6, soil_unit_weight=19.0)
     assert res.ok, res.error
     assert res.data["foundations"]["allowable_bearing_pressure"] == pytest.approx(200.0)
     assert res.data["foundations"]["defaults_applied"] == []
-    assert not ({"allowable_bearing_pressure", "footing_cover"} & {d.name for d in project.design_results["D"].inputs.defaults_applied})
+    assert not ({"allowable_bearing_pressure", "footing_cover", "soil_depth", "soil_unit_weight"}
+                & {d.name for d in project.design_results["D"].inputs.defaults_applied})
     assert {"fy", "cover", "E"} <= {d.name for d in project.design_results["D"].inputs.defaults_applied}
     # A smaller allowable pressure needs larger footings
     small = run_design(project, design_case_id="D2", analysis_case_id="ENV", allowable_bearing_pressure=100.0)

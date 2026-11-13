@@ -143,15 +143,20 @@ def run_design(
     analysis_case_id: Optional[str] = None,
     allowable_bearing_pressure: Optional[float] = None,
     footing_cover: Optional[float] = None,
+    soil_depth: Optional[float] = None,
+    soil_unit_weight: Optional[float] = None,
 ) -> ToolResult:
     """
     Run ACI 318 design + detailing for every element in the project model.
 
     Members are designed with the materials and cover of their sections. Isolated footings under the supported
-    columns are sized for ``allowable_bearing_pressure`` (the allowable soil bearing pressure under service loads,
-    strictly in the model pressure unit; default 150 kPa, marked preliminary) with ``footing_cover`` (model length
-    unit; default 3 in) from the service-level reactions (ASCE 7-22 §2.4 combinations) and designed for strength from
-    the factored ones. The defaults used are reported and recorded on the design result.
+    columns are sized and designed: stable and within ``allowable_bearing_pressure`` (the net allowable soil
+    pressure under service loads, strictly in the model pressure unit; default 150 kPa, marked preliminary) under
+    the service-level reactions (ASCE 7-22 §2.4 combinations), and strong enough for the factored ones, with
+    ``footing_cover`` (model length unit; default 3 in). The vertical load includes the footing's own weight and
+    ``soil_depth`` (model length unit; default 0.5 m) of soil of ``soil_unit_weight`` (model weight density unit;
+    default 18 kN/m^3) above it. The defaults used are reported and recorded on the design result. Footings count
+    toward the governing demand/capacity ratio.
 
     The result is stored on the project under ``design_case_id`` and
     :func:`validate_design` is run immediately so the agent never sees
@@ -234,6 +239,8 @@ def run_design(
     try:
         check_realistic("allowable_bearing_pressure", allowable_bearing_pressure, units)
         check_realistic("footing_cover", footing_cover, units)
+        check_realistic("soil_depth", soil_depth, units)
+        check_realistic("soil_unit_weight", soil_unit_weight, units)
     except ValueError as exc:
         return ToolResult.failure("run_design", AgentError(error_type="invalid_input", message=str(exc)))
     if allowable_bearing_pressure is None:
@@ -242,6 +249,12 @@ def run_design(
     if footing_cover is None:
         footing_cover = defaults.FOOTING_COVER.in_units(units)
         applied.append(defaults.FOOTING_COVER.record(model_units=units))
+    if soil_depth is None:
+        soil_depth = defaults.SOIL_DEPTH.in_units(units)
+        applied.append(defaults.SOIL_DEPTH.record(model_units=units))
+    if soil_unit_weight is None:
+        soil_unit_weight = defaults.SOIL_UNIT_WEIGHT.in_units(units)
+        applied.append(defaults.SOIL_UNIT_WEIGHT.record(model_units=units))
     service = _service_results(project) if project.model.supports else []
 
     try:
@@ -253,6 +266,8 @@ def run_design(
             allowable_bearing_pressure=allowable_bearing_pressure if service else None,
             footing_cover=footing_cover if service else None,
             service_analysis_results=service or None,
+            soil_depth=soil_depth if service else None,
+            soil_unit_weight=soil_unit_weight if service else None,
         )
     except Exception as exc:
         return ToolResult.failure(
@@ -291,7 +306,10 @@ def run_design(
     foundations = (
         {"designed": True, "allowable_bearing_pressure": allowable_bearing_pressure,
          "pressure_unit": unit_label(units, "pressure"), "footing_cover": footing_cover,
-         "defaults_applied": [d.model_dump() for d in applied]}
+         "soil_depth": soil_depth, "soil_unit_weight": soil_unit_weight,
+         "weight_density_unit": unit_label(units, "weight_density"),
+         "defaults_applied": [d.model_dump() for d in applied],
+         **_footing_summary(design_res)}
         if service else
         {"designed": False,
          "reason": "No service-level reactions: run_analysis keeps the load-case results the bearing check needs."}
@@ -324,8 +342,27 @@ def run_design(
     )
 
 
+def _footing_summary(design_res: Any) -> dict[str, Any]:
+    """Number of footings, the governing one, and the checks that fail (with their messages)."""
+    footings = {eid: r for eid, r in design_res.element_results.items() if getattr(r, "member_type", None) == "footing"}
+    if not footings:
+        return {"n_footings": 0}
+    gov_id, gov = max(footings.items(), key=lambda item: float(item[1].governing_dcr or 0.0))
+    failing = []
+    for eid, r in footings.items():
+        checks = [("flexure", r.flexure), ("shear", r.shear)] + [(c.description, c) for c in (r.code_checks or [])]
+        for name, chk in checks:
+            if chk is not None and float(getattr(chk, "dcr", 0.0) or 0.0) > 1.0:
+                msgs = [m for m in (getattr(chk, "messages", None) or []) if m][:2]
+                failing.append({"footing": str(eid), "check": name, "dcr": round(float(chk.dcr), 3), "messages": msgs})
+    return {"n_footings": len(footings), "governing_footing": str(gov_id),
+            "governing_footing_dcr": round(float(gov.governing_dcr or 0.0), 3), "failing_footing_checks": failing[:10]}
+
+
 def governing_frame_summary(design_res: Any) -> dict[str, Any]:
-    """Governing demand-capacity summary of the superstructure (beams and columns) and footings."""
+    """Governing demand-capacity summary of the structure: beams, columns, and frame-level checks; a footing that
+    fails governs too (``foundation_governing_dcr`` reports the footings in any case), and ``passed`` requires every
+    footing to pass."""
     frame = {
         eid: r for eid, r in design_res.element_results.items()
         if getattr(r, "member_type", None) in ("beam", "column")
@@ -352,13 +389,23 @@ def governing_frame_summary(design_res: Any) -> dict[str, Any]:
     all_sys_passed = all(getattr(c, "passed", True) for c in system_checks)
     footing_ok = (max(footings) <= 1.0) if footings else True
 
+    footing_results = {eid: r for eid, r in design_res.element_results.items()
+                       if getattr(r, "member_type", None) == "footing"}
+
+    def footing_state(r: Any) -> str:
+        states = [(float(r.flexure.dcr) if r.flexure is not None else 0.0, "Footing flexure (ACI 318-25 §13.3.3)"),
+                  (float(r.shear.dcr) if r.shear is not None else 0.0, "Footing one-/two-way shear (ACI 318-25 §22.5, §22.6)")]
+        states += [(float(c.dcr), f"{c.description} ({c.clause})") for c in (r.code_checks or [])]
+        return max(states, key=lambda item: item[0])[1]
+
     if not frame:
-        max_ftg = max(footings)
+        ftg_id, ftg = max(footing_results.items(), key=lambda item: float(item[1].governing_dcr or 0.0))
         summary.update(
-            governing_dcr=max_ftg,
+            governing_dcr=float(ftg.governing_dcr or 0.0),
             passed=footing_ok and all_elem_passed and all_sys_passed,
+            governing_member_id=str(ftg_id),
             governing_member_type="footing",
-            governing_limit_state="Foundation bearing / flexure",
+            governing_limit_state=footing_state(ftg),
         )
         return summary
 
@@ -384,6 +431,15 @@ def governing_frame_summary(design_res: Any) -> dict[str, Any]:
             governing = float(worst.dcr)
             state = f"{worst.description} ({worst.clause})"
             member_id, member_type = None, "frame"
+    # A footing is sized to pass, so its ratio is near 1.0 by construction and says nothing about the frame; it
+    # governs only when it fails (no isolated footing within the sizer's range is stable, within the allowable
+    # pressure, and strong enough), which then makes the design non-compliant
+    if footing_results:
+        ftg_id, ftg = max(footing_results.items(), key=lambda item: float(item[1].governing_dcr or 0.0))
+        if float(ftg.governing_dcr or 0.0) > max(governing, 1.0):
+            governing = float(ftg.governing_dcr)
+            state = footing_state(ftg)
+            member_id, member_type = str(ftg_id), "footing"
     d_units = getattr(design_res, "units", None)
     summary.update(
         governing_dcr=governing,
@@ -423,13 +479,23 @@ def inspect_design_results(project: Any, design_case_id: str) -> ToolResult:
             ),
         )
 
+    from struct_core import conversion_factor
+
+    units = getattr(getattr(project, "metadata", None), "units", None)
+    to_model = conversion_factor("kip, in", units, "length") if units is not None else None
     elements: dict[str, Any] = {}
     for elem_id, elem_des in design_res.element_results.items():
-        elements[str(elem_id)] = {
+        entry = {
             "member_type": getattr(elem_des, "member_type", None),
             "governing_dcr": float(getattr(elem_des, "governing_dcr", 0.0) or 0.0),
             "passed": bool(getattr(elem_des, "passed", False)),
         }
+        # Footings are sized by run_design: their plan dimensions and thickness, model length unit
+        dims = [getattr(elem_des, name, None) for name in ("_length_in", "_width_in", "_thickness_in")]
+        if entry["member_type"] == "footing" and to_model is not None and all(d is not None for d in dims):
+            entry.update(length=round(dims[0] * to_model, 4), width=round(dims[1] * to_model, 4),
+                         thickness=round(dims[2] * to_model, 4), length_unit=str(units.length))
+        elements[str(elem_id)] = entry
 
     return ToolResult.success(
         "inspect_design_results",

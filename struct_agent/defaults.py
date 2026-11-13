@@ -78,6 +78,13 @@ FOOTING_COVER = EngineeringDefault(
 ALLOWABLE_BEARING_PRESSURE = EngineeringDefault(
     "allowable_bearing_pressure", 150.0, "kPa", "assumed for preliminary footing sizing; confirm by geotechnical "
                                                 "investigation", "pressure", "kN, m")
+# Soil above the footings: it loads the soil and resists uplift and overturning with the footing's own weight
+SOIL_DEPTH = EngineeringDefault(
+    "soil_depth", 0.5, "m", "assumed depth of soil above the top of the footings; confirm with the foundation "
+                            "drawings", "length", "kN, m")
+SOIL_UNIT_WEIGHT = EngineeringDefault(
+    "soil_unit_weight", 18.0, "kN/m^3", "assumed unit weight of backfill; confirm by geotechnical investigation",
+    "weight_density", "kN, m")
 
 # Seismic
 RISK_CATEGORY = EngineeringDefault("risk_category", "II", None, "ASCE 7-22 Table 1.5-1 (ordinary buildings)")

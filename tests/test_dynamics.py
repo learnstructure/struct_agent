@@ -602,3 +602,41 @@ def test_response_spectrum_design_spectrum_with_r_requires_system_type():
     res = run_response_spectrum(proj, analysis_case_id="RSA", sds=1.0, sd1=0.6, r_factor=8.0, direction="x")
     assert not res.ok
     assert "system_type" in res.error.message
+
+
+def test_response_spectrum_refuses_too_few_modes():
+    """ASCE 7-22 Section 12.9.1.1: the modes of a response spectrum analysis carry at least 90 % of the mass in the
+    direction of response. A given n_modes that does not is refused; all modes (the default) pass."""
+    from struct_agent.tools.dynamics import MIN_MASS_PARTICIPATION
+    from struct_agent.tools.loads import apply_gravity_loads
+
+    proj = _build_2d_frame_project()
+    assert apply_gravity_loads(proj, occupancy="office", tributary_width=5.0, superimposed_dead=1.5).ok
+    spectrum = dict(sds=1.0, sd1=0.6, tl=8.0, direction="x")
+    full = run_response_spectrum(proj, analysis_case_id="RSA_all", **spectrum)
+    assert full.ok, full.error
+    assert full.data["cumulative_mass_participation"] >= MIN_MASS_PARTICIPATION
+
+    # The fewest modes that reach 90 % pass, one mode fewer is refused
+    passing = None
+    for n in range(1, 40):
+        res = run_response_spectrum(proj, analysis_case_id=f"RSA_{n}", n_modes=n, **spectrum)
+        if res.ok:
+            passing = n
+            assert res.data["cumulative_mass_participation"] >= MIN_MASS_PARTICIPATION
+            break
+        assert res.error.error_type == "insufficient_modes"
+        assert "12.9.1.1" in res.error.message
+    assert passing is not None
+
+
+def test_time_history_damps_every_mode_by_default():
+    """A stated modal damping ratio applies to every mode: the default leaves no mode undamped, and damping only
+    the lowest modes (n_modes_damping) changes the response of a frame with many modes."""
+    import inspect
+
+    assert inspect.signature(run_time_history).parameters["n_modes_damping"].default is None
+    from struct_agent.llm.schemas import get_tool_schemas
+
+    schema = next(t["function"] for t in get_tool_schemas() if t["function"]["name"] == "run_time_history")
+    assert "default" not in schema["parameters"]["properties"]["n_modes_damping"]

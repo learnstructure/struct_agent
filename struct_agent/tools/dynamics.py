@@ -83,6 +83,8 @@ def _resolve_ground_motion(
     raise TypeError(f"Unsupported ground_motion type: {type(ground_motion).__name__}")
 
 
+# ASCE 7-22 §12.9.1.1: least combined modal mass participation of a response spectrum analysis
+MIN_MASS_PARTICIPATION = 0.90
 _STATION_COMPONENTS = {6: ("P", "V2", "M3"), 12: ("P", "V2", "V3", "T", "M2", "M3")}
 
 
@@ -431,7 +433,7 @@ def run_time_history(
     record_scale: float = 1.0,
     scale_factor: Optional[float] = None,
     damping_ratio: float = 0.05,
-    n_modes_damping: int = 3,
+    n_modes_damping: Optional[int] = None,
     method: str = "newmark_beta",
     solver: str = "auto",
     mass_source: Optional[Any] = None,
@@ -471,7 +473,8 @@ def run_time_history(
     damping_ratio
         Modal damping ratio zeta (default: 0.05 for 5% damping).
     n_modes_damping
-        Number of modes to apply Rayleigh/modal damping to (default: 3).
+        Number of lowest modes that receive ``damping_ratio``; the remaining modes are left undamped. ``None``
+        (default) damps every mode, which is what a stated modal damping ratio means.
     method
         Integration method: ``"newmark_beta"`` (default) or ``"central_difference"``.
     solver
@@ -856,7 +859,8 @@ def run_response_spectrum(
     combination
         Modal combination rule: 'CQC' (default), 'SRSS', or 'ABS'.
     n_modes
-        Number of modes to consider.
+        Number of modes to consider (default: all). ASCE 7-22 §12.9.1.1 requires the modes to reach at least 90 %
+        of the mass in each direction of response; a number that does not is refused.
     damping_ratio
         Modal damping ratio (default: 0.05).
     spectrum_scale
@@ -1093,6 +1097,18 @@ def run_response_spectrum(
                 scale_factor=sf,
                 combination=combination,
             )
+            # ASCE 7-22 §12.9.1.1: the modes must carry at least 90 % of the mass in the direction of response
+            participation = float(np.sum(np.asarray(sub_res["mass_participation_ratio"], dtype=float)))
+            if n_modes is not None and participation < MIN_MASS_PARTICIPATION - 1e-9:
+                return ToolResult.failure(
+                    "run_response_spectrum",
+                    AgentError(
+                        error_type="insufficient_modes",
+                        message=(f"n_modes={n_modes} gives {participation:.1%} of the mass in the {d_dir.upper()} "
+                                 f"direction; ASCE 7-22 §12.9.1.1 requires at least {MIN_MASS_PARTICIPATION:.0%}."),
+                        possible_causes=["Too few modes: increase n_modes, or omit it to include every mode"],
+                    ),
+                )
             rsa_res = sub_res
             rsa_res_by_dir[d_dir] = sub_res
             base_shear_by_direction[d_dir] = float(sub_res["combined_base_shear"][0])

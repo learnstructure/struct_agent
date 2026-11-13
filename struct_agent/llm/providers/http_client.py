@@ -90,7 +90,7 @@ class NativeHTTPProvider(BaseLLMProvider):
                 break
             except urllib.error.HTTPError as exc:
                 err_msg = exc.read().decode("utf-8", errors="replace")
-                if exc.code in (429, 503) and attempt < max_retries:
+                if exc.code in (429, 500, 502, 503, 504) and attempt < max_retries:
                     import time
                     retry_wait = base_delay * (1.5 ** attempt)
                     try:

@@ -90,7 +90,7 @@ def run_dynamic_pipeline():
         ground_motion="elcentro",
         direction="x",
         damping_ratio=0.05,  # 5% critical damping
-        n_modes_damping=3,
+        n_modes_damping=None,  # every mode damped
         method="newmark_beta",
         solver="auto",
         envelope_to_design=True,

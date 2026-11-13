@@ -278,7 +278,7 @@ Initializes a new `struct_core.Project` container. Accepts an existing `Structur
 High-level parametric generator for regular orthogonal 2D plane frames or 3D space frames of reinforced concrete. Provisions grid nodes, column/beam connectivity, the concrete and reinforcing-steel materials, rectangular sections that own them (with their clear cover), and base supports.
 - **Signature:**
   ```python
-  create_frame_model(num_bays=None, bay_width=None, num_stories=None, story_height=None, *, fc, fy=None, fyt=None, unit_weight=None, cover=None, stress_unit=None, weight_density_unit=None, title=None, author=None, units="kN, m", dimension="2d", bay_widths_x=None, bay_widths_y=None, story_heights=None, support_type="fixed", col_b=None, col_h=None, beam_b=None, beam_h=None) -> ToolResult
+  create_frame_model(num_bays=None, bay_width=None, num_stories=None, story_height=None, *, fc, fy=None, fyt=None, unit_weight=None, cover=None, bays_x=None, bays_y=None, bay_width_x=None, bay_width_y=None, bay_widths_x=None, bay_widths_y=None, title=None, author=None, units=None, dimension="2d", story_heights=None, support_type="fixed", col_b=None, col_h=None, beam_b=None, beam_h=None) -> ToolResult
   ```
 - **Parameters:**
   - `num_bays`: Number of horizontal bays (or list `bay_widths_x`, and `bay_widths_y` in 3D, for non-uniform spacing).
@@ -288,9 +288,9 @@ High-level parametric generator for regular orthogonal 2D plane frames or 3D spa
   - `dimension`: `"2d"` for plane frame, `"3d"` for space frame.
   - `support_type`: Base boundary conditions (`"fixed"` or `"pinned"`).
   - `col_b`, `col_h`, `beam_b`, `beam_h`: Column and beam cross-section dimensions in model length units (omitted: trial sizes of 0.40 m columns and 0.30 × 0.50 m beams, converted to the model unit and reported).
-  - `fc` (required): concrete compressive strength f'c in the model stress unit, or in `stress_unit` (`kPa`, `MPa`, `Pa`, `psi`, `ksi`, `psf`, `ksf`).
+  - `fc` (required): concrete compressive strength f'c in the model stress unit (kPa for `kN, m`, ksi for `kip, in`).
   - `fy`, `fyt`: longitudinal and transverse reinforcement yield strengths (same unit as `fc`; default ASTM A615 Grade 60, and `fyt = fy`).
-  - `unit_weight`: concrete unit weight in the model weight-density unit or `weight_density_unit` (`kN/m3`, `N/m3`, `pcf`, `kcf`, or `kg/m3` for a mass density such as 2400 kg/m³, weighed under standard gravity; default 150 pcf).
+  - `unit_weight`: concrete unit weight in the model weight-density unit (kN/m³ for `kN, m`: 2400 kg/m³ is 23.54 kN/m³; default 150 pcf).
   - `cover`: clear cover to the ties and stirrups, model length unit (default 1.5 in, ACI 318-25 Table 20.5.1.3.1).
   - Geometry is required: `num_bays` and `bay_width` or `bay_widths_x`; `num_stories` and `story_height` or `story_heights`.
 - **Materials:** `CONCRETE` (`ConcreteMaterial`: f'c; E from f'c per ACI 318-25 §19.2.2.1 unless given), `REBAR` (`RebarMaterial`) and, when `fyt` differs from `fy`, `REBAR_TRANSVERSE`. Each section names its concrete (`material_id`), its bars (`rebar_material_id`, `transverse_rebar_material_id`) and its `cover`.
@@ -298,7 +298,7 @@ High-level parametric generator for regular orthogonal 2D plane frames or 3D spa
 - **Example:**
   ```python
   res = create_frame_model(num_bays=3, bay_width=6.0, num_stories=4, story_height=3.5, dimension="3d",
-                           fc=30.0, fy=420.0, stress_unit="MPa", cover=0.04)
+                           fc=30000.0, fy=420000.0, cover=0.04)  # kPa in a kN, m model
   project = res.data["project"]
   ```
 
@@ -311,7 +311,7 @@ Compiles a complete 3D structural model from an architectural or structural floo
 - **Parameters:**
   - `draft`: `FloorPlanDraft` instance or dictionary with `x_grids`, `y_grids`, `stories`, `columns`, `beams`.
   - `default_col_b`, `default_col_h`, `default_beam_b`, `default_beam_h`: sections of members without their own size, including the automatically placed ones (model length units; default 0.45 m columns and 0.30 × 0.50 m beams).
-  - `fc` (required): f'c in the draft's stress unit, or in `stress_unit`; `fy`, `fyt`, `unit_weight` (`weight_density_unit`) and `cover` as in `create_frame_model`. A draft from before f'c followed the draft units (`concrete_fc`) is read as MPa.
+  - `fc` (required): f'c in the draft's stress unit; `fy`, `fyt`, `unit_weight` and `cover` as in `create_frame_model`, in the draft's units. A draft from before f'c followed the draft units (`concrete_fc`) is read as MPa.
   - The model is created without loads; apply them with `apply_gravity_loads`.
   - `project`: Optional existing `Project` container.
 - **Returns (`data`):** `{"project": Project, "title": str, "n_nodes": int, "n_elements": int, "n_columns": int, "n_beams": int, ...}`
@@ -323,8 +323,8 @@ Provides a human- and LLM-readable summary of project status, geometry counts, a
 
 #### `modify_project`
 Applies declarative model modifications (updating rectangular, circular, or general section dimensions, member reassignments, material properties) or an optional programmatic callback mutator function safely to a `Project`.
-- **Signature:** `modify_project(project, mutator=None, *, sections=None, member_assignments=None, materials=None, stress_unit=None, weight_density_unit=None) -> ToolResult`
-- **Materials** (model units, or `stress_unit` / `weight_density_unit`): `{"id", "type": "concrete", "fc", "E", "nu", "unit_weight"}`, `{"id", "type": "rebar", "fy", "fu", "E", "unit_weight"}`, or `{"id", "E", ...}`. An existing material keeps what is not given; a stated modulus (e.g. an imported material that is now given f'c) is kept, while the default E of a concrete follows a new f'c. Concrete sections without bars or cover then take Grade 60 bars and the 1.5 in cover (reported in `defaults_applied`).
+- **Signature:** `modify_project(project, mutator=None, *, sections=None, member_assignments=None, materials=None) -> ToolResult`
+- **Materials** (model units): `{"id", "type": "concrete", "fc", "E", "nu", "unit_weight"}`, `{"id", "type": "rebar", "fy", "fu", "E", "unit_weight"}`, or `{"id", "E", ...}`. An existing material keeps what is not given; a stated modulus (e.g. an imported material that is now given f'c) is kept, while the default E of a concrete follows a new f'c. Concrete sections without bars or cover then take Grade 60 bars and the 1.5 in cover (reported in `defaults_applied`).
 - **Sections** own their material: a new section needs `material_id`; an existing one keeps every property that is not given, and a change of shape keeps its materials and cover. Members take a material only through their section (`member_assignments` with a `material_id` is refused).
 - A refused modification leaves the model unchanged.
 - Stored member self-weight loads (`is_self_weight`) are recomputed from the new sections and materials, so the next analysis carries the updated weight (`data["self_weight_updated_cases"]`, new totals in `data["total_dead_load"]`).
@@ -335,7 +335,7 @@ Applies declarative model modifications (updating rectangular, circular, or gene
   - Circular section: `modify_project(project, sections=[{"id": "Pier_D500", "d": 0.60}])`
   - General section: `modify_project(project, sections=[{"id": "W14x90", "type": "general", "A": 0.0171, "I3": 0.000416}])`
   - New section for some members: `modify_project(project, sections=[{"id": "COL_CORNER", "b": 0.5, "h": 0.5, "material_id": "CONCRETE"}], member_assignments=[{"element_ids": ["C_1_1", "C_4_1"], "section_id": "COL_CORNER"}])`
-  - Concrete strength of an imported model: `modify_project(project, materials=[{"id": "CONC", "type": "concrete", "fc": 4.0}], stress_unit="ksi")`
+  - Concrete strength of an imported model in `kip, in`: `modify_project(project, materials=[{"id": "CONC", "type": "concrete", "fc": 4.0}])`
 
 #### `set_project_units`
 Explicitly defines or converts project units across all entities via `struct_core.units`.
@@ -366,13 +366,13 @@ Full JSON serialization and deserialization round-trip for `struct_core.Project`
 Ingests SAP2000 `.s2k` or `.$2k` text files into a validated `Project`. Automatically extracts nodes, frame elements, sections, materials, supports, load cases/patterns, and unit system metadata.
 - **Signature:**
   ```python
-  import_from_sap2000(s2k_path, *, project_title=None, materialize_self_weight=False, fy=None, fyt=None, cover=None, stress_unit=None) -> ToolResult
+  import_from_sap2000(s2k_path, *, project_title=None, materialize_self_weight=False, fy=None, fyt=None, cover=None, allow_partial_import=False) -> ToolResult
   ```
 - **Parameters:**
   - `s2k_path`: File path to the SAP2000 `.s2k` file.
   - `project_title`: Optional title override.
   - `materialize_self_weight`: When `True`, automatically computes and adds member self-weight line loads into the dead load case.
-  - `fy`, `fyt`, `cover`, `stress_unit`: the reinforcement of the concrete frame sections the file gives no bars for (yield strengths in the model stress unit or `stress_unit`, `fyt` default `fy`; cover in the model length unit, default 1.5 in, reported). Sections with reinforcement in the file keep it.
+  - `fy`, `fyt`, `cover`: the reinforcement of the concrete frame sections the file gives no bars for (yield strengths in the model stress unit, `fyt` default `fy`; cover in the model length unit, default 1.5 in, reported). Sections with reinforcement in the file keep it.
 - **Returns (`data`):** `{"project": Project, "n_nodes": int, "n_elements": int, "n_load_cases": int, "materials": list, "import_notes": list, "before_design": list}`. Materials are read as the file defines them (concrete f'c, rebar fy / fu); nothing is invented. `before_design` lists what reinforced-concrete design still needs, e.g. a material without f'c, to be given with `modify_project`.
 - **Example:**
   ```python
@@ -389,7 +389,7 @@ Exports a `Project` model to a native SAP2000 `.s2k` text file with full coordin
 Ingests from and exports to ETABS `.e2k` / `.$et` text files with full floor-story, grid, and framing connectivity preservation.
 - **Signatures:**
   ```python
-  import_from_etabs(e2k_path, *, project_title=None, fy=None, fyt=None, cover=None, stress_unit=None) -> ToolResult
+  import_from_etabs(e2k_path, *, project_title=None, fy=None, fyt=None, cover=None, allow_partial_import=False) -> ToolResult
   export_to_etabs(project, *, output_path) -> ToolResult
   ```
 
@@ -409,12 +409,12 @@ Gives the frame's rectangular column and beam sections rule-of-thumb starting si
 Applies ASCE 7 / IBC occupancy-based live loads (e.g. `"office"`, `"residential"`, `"classroom"`, `"storage"`) and superimposed dead loads distributed across member tributary widths.
 - **Signature:**
   ```python
-  apply_gravity_loads(project, *, occupancy, superimposed_dead, tributary_width=None, include_self_weight=True, partition_weight=None, pressure_unit=None) -> ToolResult
+  apply_gravity_loads(project, *, occupancy, superimposed_dead, tributary_width=None, one_way_span=None, include_self_weight=True, custom_live_load=None, two_way=None, partition_weight=None, allow_partial_floor=False) -> ToolResult
   ```
 - **Parameters:**
   - `occupancy` (required): ASCE 7 occupancy category name.
   - `tributary_width`: Tributary floor width in the model length unit; required for one-way distribution (every 2D frame). In 3D, omitted means two-way floor panels.
-  - `superimposed_dead` (required; 0 for none): Additional dead load in the model pressure unit (kPa for `kN, m`, ksf for `kip, ft`), or in `pressure_unit` (`kPa`, `Pa`, `MPa`, `psf`, `ksf`, `psi`, `ksi`). Pressures above 50 kPa are rejected as unit mistakes.
+  - `superimposed_dead` (required; 0 for none): Additional dead load in the model pressure unit (kPa for `kN, m`, ksf for `kip, ft`). Pressures above 50 kPa are rejected as unit mistakes.
   - `include_self_weight`: When `True`, automatically triggers self-weight calculations.
   - `partition_weight`: Partition weight for the seismic mass (ASCE 7-22 §12.7.2 item 2), as a pressure in model units. It defaults to 0.48 kPa (10 psf) for occupancies with a partition allowance. It is stored as the `PartitionWeight` case, which the combinations ignore.
 - **Returns (`data`):** `dead_case_id`, `live_case_id`, `partition_weight_case_id` (or `None`), `total_dead_load` (member self-weight plus superimposed dead load, which is the total dead load W), `total_live_load`, `total_partition_weight`, and `force_unit`. The totals are the resultants of each case in the model force unit.
@@ -502,13 +502,14 @@ Extracts a structured engineering summary of analysis results: max nodal displac
 Executes dynamic earthquake response history integration using `structdyn`. Bridges the model directly to an MDF dynamic system, runs numerical integration (modal superposition or Newmark-Beta), and envelopes peak member dynamic internal forces into an `AnalysisResult` ready for code design.
 - **Signature:**
   ```python
-  run_time_history(project, *, analysis_case_id, ground_motion="elcentro", component=None, direction="x", dt=None, scale_factor=1.0, damping_ratio=0.05, n_modes_damping=2, method="newmark_beta", solver="auto", envelope_to_design=True) -> ToolResult
+  run_time_history(project, *, analysis_case_id, ground_motion="elcentro", component=None, direction="x", dt=None, scale_factor=1.0, damping_ratio=0.05, n_modes_damping=None, method="newmark_beta", solver="auto", envelope_to_design=True) -> ToolResult
   ```
 - **Parameters:**
   - `ground_motion`: record file path (PEER `.AT2`, or two-column `.csv` of time [s] and acceleration [g]), built-in event name (`"elcentro"`, `"loma_prieta"`, `"loma_prieta:hor2"`), `GroundMotion` object, or acceleration array in g.
   - `component`: Component of a built-in event (`"hor1"`, `"hor2"`, `"up"`). Inferred from `direction` if omitted.
   - `direction`: Excitation direction (`"x"`, `"y"`, or `"z"`).
-  - `damping_ratio`: Modal or Rayleigh damping ratio $\zeta$ (default: $0.05$).
+  - `damping_ratio`: Modal damping ratio $\zeta$ (default: $0.05$).
+  - `n_modes_damping`: Number of lowest modes that receive `damping_ratio`; the other modes are left undamped. `None` (default) damps every mode.
   - `envelope_to_design`: When `True`, envelopes member $P, V, T, M$ at the standard stations over all time steps for downstream ACI 318 design.
 - **Seismic mass:** when neither the call nor the model defines a mass source, the ASCE 7-22 §12.7.2 mass source is attached (dead load 100 %, storage live 25 %, general live 0 %; member self-weight counted once). The same lumped-mass convention is used by modal analysis and RSA, so all three report the same periods.
 - **Returns (`data`):** `fundamental_period`, `peak_lateral_displacement`, `peak_base_shear` (from global equilibrium of restoring forces), member force envelopes, `n_steps`, `pga`, ...
@@ -517,6 +518,7 @@ Executes dynamic earthquake response history integration using `structdyn`. Brid
 Response spectrum analysis (CQC/SRSS) from an ASCE 7 design spectrum (`sds`, `sd1`), a record (`ground_motion`, same inputs as above), or a user curve. Forces are divided by R/Ie (`r_factor`, `importance_factor`; no reduction when `r_factor` is omitted; Ie defaults to the value of `risk_category`, ASCE 7-22 Table 1.5-2). `tl` (the mapped TL) is needed only for modes with periods above 4 s. With `direction="both"` the X and Y responses are kept separate, and each direction's sign-less response is stored as `<analysis_case_id>_EX` / `_EY` with its support reactions (the combined base forces of the members at each support, in global axes) for the footing bearing check of `run_design`.
 - **ELF scaling (ASCE 7-22 §12.9.1.4.1):** for a design-spectrum RSA with `r_factor`, the forces in each direction are multiplied by V/Vt where the modal base shear Vt is below the ELF base shear V = Cs·W (T of the dominant mode, capped at Cu·Ta). `system_type` (e.g. `"rc_smf"`) is then required for Ta; `s1` enables the Eq. 12.8-7 lower bound. The factors are reported in `data["elf_scaling"]`. Record-spectrum RSA has no SDS, so it is not scaled (the reason is reported).
 - **Design envelope:** when the model has dead (and live) load cases, the sign-less spectral response is combined with them through the ASCE 7-22 LRFD combinations (Ev = 0.2·SDS·D when `sds` is given; 1.0E_X ± 0.3E_Y for bi-directional runs), taking the governing branch of G ± E at each station. The envelope is stored as `<analysis_case_id>_design` and made the active case, so `run_design` checks gravity plus earthquake.
+- **Number of modes (ASCE 7-22 §12.9.1.1):** all modes are included unless `n_modes` is given. A given `n_modes` whose modes carry less than 90 % of the mass in a direction of response is refused (`insufficient_modes`).
 - **Cracked sections and second order:** `cracked_sections` and `second_order` work as in `run_analysis`. Story drifts and story shears are CQC combinations of the modal values; drift is checked against Table 12.12-1 (scaled per §12.9.1.4.2 when S1 ≥ 0.6) and θ against θ_max. `risk_category` sets the drift limit.
 - **Returns (`data`):** `combined_base_shear` (largest direction, after scaling), `base_shear_by_direction`, `elf_scaling`, `fundamental_period`, `design_case_id`, ...
 
@@ -532,10 +534,10 @@ Summarizes peak dynamic responses, floor displacement envelopes, base shear time
 Designs the reinforcement and runs reinforced concrete code checks per **ACI 318-25** using `aci318`. Beams are reinforced for the analysis envelope. Column longitudinal bars are designed between 1 % and 8 % of $A_g$ (6 % for special moment frames) for axial-flexural strength and, in special moment frames, strong-column/weak-beam. Evaluates beam flexure ($M_u \le \phi M_n$), beam shear ($V_u \le \phi V_n$), column axial-flexural P-M interaction, and shear ties, and reports stirrup schedules and demand-capacity ratios (DCR).
 - **Signature:**
   ```python
-  run_design(project, *, design_case_id, design_code="ACI 318-25", analysis_case_id=None, allowable_bearing_pressure=None, pressure_unit=None, footing_cover=None) -> ToolResult
+  run_design(project, *, design_case_id, design_code="ACI 318-25", analysis_case_id=None, allowable_bearing_pressure=None, footing_cover=None, soil_depth=None, soil_unit_weight=None) -> ToolResult
   ```
 - **Materials:** every member is designed with the concrete (f'c, unit weight for λ), bars (fy, fyt) and clear cover of its section; a section without them is refused with the reason (`modify_project` sets them).
-- **Footings (ACI 318-25 R13.2.6.1):** an isolated footing under each supported column, sized for `allowable_bearing_pressure` (model pressure unit or `pressure_unit`; default 150 kPa, reported as a preliminary assumption) from the service-level reactions, and designed for one-way shear, punching and flexure from the factored ones, with `footing_cover` (model length unit; default 3 in). The service reactions are the ASCE 7-22 §2.4 combinations of the stored load-case results; a response spectrum enters as ±0.7|E| on each reaction component (one result adds it to every component, a second subtracts it from the vertical reaction). Without stored load-case results the footings are not designed, and `data["foundations"]` says why.
+- **Footings (ACI 318-25 Chapter 13):** an isolated footing under each supported column, sized and designed: the resultant inside the base and no net uplift (stability), the net soil pressure within `allowable_bearing_pressure` (model pressure unit; default 150 kPa, reported as a preliminary assumption) under the service-level reactions, and one-way shear, punching (with moment transfer) and flexure under the factored ones, with `footing_cover` (model length unit; default 3 in). The vertical load includes the footing's own weight (the column concrete's unit weight) and `soil_depth` of soil of `soil_unit_weight` above it (model units; defaults 0.5 m and 18 kN/m³, reported), scaled by each combination's dead-load factor; the moment at the footing base includes the column shear times the thickness. The base grows for bearing and stability and the thickness for strength. The service reactions are the ASCE 7-22 §2.4 combinations of the stored load-case results; a response spectrum enters as ±0.7|E| on each reaction component (one result adds it to every component, a second subtracts it from the vertical reaction). Footings count toward the governing DCR; `data["foundations"]` reports the governing footing and any failing footing check with its message. Without stored load-case results the footings are not designed, and `data["foundations"]` says why.
 - **Design basis:** an analysis of the factored load combinations: the envelope of `generate_load_combinations` + `run_analysis`, a response spectrum or response history design envelope, or a single combination. Unfactored load-case results and a seismic-only response spectrum result are refused.
 - **Frame checks:** beam-column joint shear for every frame (ACI 318-25 Chapter 15), plus the Chapter 18 checks of the frame type recorded in `project.seismic_basis`: special frames get capacity-design shear, strong-column/weak-beam, confinement and joints; intermediate frames get capacity shear and joints. The analysis checks (slenderness, drift, stability) are included too. When one of these governs, `governing_member_type` is `"frame"` and `governing_member_id` is `None`.
 - **Returns (`data`):** `governing_dcr`, `passed`, `governing_member_id`, `governing_member_type`, `governing_limit_state`, `dcr_flexure`, `dcr_shear` for the superstructure (beams and columns), plus `foundation_governing_dcr` for the footings and `foundations` (the bearing pressure and cover used, and the defaults among them). The design result's `inputs` (`DesignInputs`) records the code, materials, sections, bearing pressure, footing cover and `defaults_applied`. Beam DCRs are $M_u/\phi M_n$ of the selected bars and $V_u/\phi V_n$ of the designed stirrups (or the $8\sqrt{f'_c}b_w d$ section limit); a beam with no feasible reinforcement reports DCR > 1.
@@ -766,7 +768,7 @@ draft = FloorPlanDraft(
         StoryDraft(id="Story2", level=2, height=3.0),
     ],
     support_type="fixed",
-    fc=4.0, stress_unit="ksi",  # concrete f'c (required)
+    fc=27600.0,  # concrete f'c in the draft's stress unit (kPa for kN, m; required)
 )
 
 # 2. Build 3D Project via ToolResult wrapper (or directly via build_project_from_draft)

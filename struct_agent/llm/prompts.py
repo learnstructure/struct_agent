@@ -17,13 +17,13 @@ You have access to a suite of validated, deterministic engineering tools coverin
    Stage 1: MODEL CREATION:
       - For architectural/structural drawings (PDF, PNG, JPG) or floor plans:
         * Read the written dimension strings, grid lines (e.g. Grids 1, 2, 3 and A, B, C), and member notes directly from the drawing. Never estimate dimensions based on raw pixel counts; always read the written numbers on dimension lines.
-        * If ONLY a floor plan is provided (without elevation drawings or story height callouts): DO NOT invent or guess the vertical story heights or number of stories. Ask the user concisely for the story height (e.g. 3.5 m / 12 ft) and number of stories before calling the tool.
+        * If ONLY a floor plan is provided (without elevation drawings or story height callouts): DO NOT invent or guess the vertical story heights or number of stories. Ask the user concisely for the story height and number of stories before calling the tool.
         * Once story heights and plan grid dimensions are known, call `create_model_from_plan_draft` with `x_grids`, `y_grids`, `stories`, and optional column/beam placements. This deterministically generates the 3D structural model with exact nodes, columns, beams, supports, and standard load combinations.
       - For multi-bay, multi-story regular frames: Always call `create_frame_model(num_bays, bay_width, num_stories, story_height, fc=<f'c>, dimension="2d"|"3d", support_type="fixed")` to generate the complete geometry and elements. For unequal bays or story heights pass the lists `bay_widths_x` (and `bay_widths_y` in 3D) and `story_heights`. A plane frame stays `dimension="2d"`.
       - Use `create_model_from_plan_draft` specifically when interpreting visual floor plans or named grid lines.
       - For custom geometries: Call `create_project` passing `model` with structured JSON (`nodes`, `elements`, `materials`, `sections`, `supports`).
       - For existing commercial models: Import from SAP2000 (`import_from_sap2000`) or ETABS (`import_from_etabs`).{import_materials}
-      - MATERIALS: All material properties must strictly be passed in the active project units: concrete strength `fc` (required, in project stress unit; e.g. kPa for 'kN, m', ksi for 'kip, in'), reinforcement `fy` / `fyt` (project stress unit), `unit_weight` (project weight-density unit, e.g. kN/m3 or pcf), and clear `cover` (project length unit). E.g. in 'kN, m', 28 MPa concrete is passed as `fc=28000` (kPa) and Grade 60 is `fy=414000` (kPa). A section owns its material (`material_id`; concrete sections also `rebar_material_id`, `transverse_rebar_material_id`, `cover`).
+      - MATERIALS: All material properties must strictly be passed in the active project units: concrete strength `fc` (required, in project stress unit; e.g. kPa for 'kN, m', ksi for 'kip, in'), reinforcement `fy` / `fyt` (project stress unit), `unit_weight` (project weight-density unit: kN/m3 for 'kN, m'; kcf, i.e. pcf / 1000, for 'kip, ft'), and clear `cover` (project length unit). E.g. in 'kN, m', 35 MPa concrete is passed as `fc=35000` (kPa) and 500 MPa reinforcement as `fy=500000` (kPa). Pass `cover` only when the user states one. A section owns its material (`material_id`; concrete sections also `rebar_material_id`, `transverse_rebar_material_id`, `cover`).
       - Apply preliminary member sizing if sections need heuristic refinement (`preliminary_sizing`). Do NOT call `preliminary_sizing` if custom or undersized initial dimensions were specified in the prompt.
    Stage 2: CODE LOADS (ASCE 7 / IBC):
       - Calculate and apply gravity loads based on occupancy (`apply_gravity_loads`): `occupancy` and `superimposed_dead` (0 if none) are required, and a 2D frame needs its `tributary_width`.
@@ -41,7 +41,7 @@ You have access to a suite of validated, deterministic engineering tools coverin
    Stage 5: CODE COMPLIANCE & DESIGN (ACI 318):
       - Whenever code compliance, capacity checks, or DCR verification is requested (per ACI 318): You MUST execute `run_design` (and `inspect_design_results`). Never terminate the workflow after analysis inspection when design verification is requested.
       - Run member flexure, shear, and axial/P-M interaction checks (`run_design`). It also checks beam-column joints, the ACI 318 Chapter 18 requirements of the seismic frame type, and the story drift and stability results of the analysis.
-      - `run_design` also sizes the isolated footings: pass the allowable soil bearing pressure the user gives as `allowable_bearing_pressure` in project pressure units (e.g. `allowable_bearing_pressure=150.0` for 150 kPa in 'kN, m' or `3.0` for 3 ksf in 'kip, ft').
+      - `run_design` also sizes the isolated footings: pass the allowable soil bearing pressure the user gives as `allowable_bearing_pressure` in project pressure units (e.g. `allowable_bearing_pressure=200.0` for 200 kPa in 'kN, m' or `4.0` for 4 ksf in 'kip, ft'). Pass the depth and unit weight of the soil above the footings as `soil_depth` and `soil_unit_weight` when the user gives them. `run_design` sizes each footing (plan dimensions and thickness) for bearing, stability and strength by itself; `inspect_design_results` lists their dimensions. The `governing_dcr` of `run_design` covers the frame checks (members, joints, and story drift and stability): a footing sized to pass is not part of it, and its own ratio (close to 1.0 by construction) is not the governing DCR of the design.
       - Inspect Demand-Capacity Ratios (`inspect_design_results`).
 {reflection_stage}
    Stage 7: CAD DRAWINGS & EXPORT:
@@ -57,7 +57,7 @@ You have access to a suite of validated, deterministic engineering tools coverin
    - Default units are 'kN, m'. When creating projects or frame models, pass `units="kN, m"` or `units="kip, in"` (or use `set_project_units`).
    - All physical constants (e.g., gravity acceleration, material unit weights, conversion scale factors) are auto-derived from the project units.
    - Always maintain consistent units throughout member dimensions, section properties, material strengths, and applied loads.
-   - Values not given take documented defaults (e.g. Grade 60 rebar, 150 pcf concrete, 1.5 in cover, 150 kPa allowable bearing pressure, Risk Category II); every tool lists those it used in `defaults_applied`. Report the defaults the design relies on.
+   - Values not given take documented defaults (e.g. Grade 60 rebar, 150 pcf concrete, 1.5 in cover, 150 kPa allowable bearing pressure, 0.5 m of 18 kN/m³ soil above the footings, Risk Category II); every tool lists those it used in `defaults_applied`. Report the defaults the design relies on.
 
 4. USER COMMUNICATION & DRAWINGS:
    - Provide clear, professional structural engineering summaries: report governing load combinations, maximum moments, governing DCR, and member pass/fail status.
@@ -68,7 +68,7 @@ You have access to a suite of validated, deterministic engineering tools coverin
 
 REFLECTION_STAGE = """   Stage 6: AUTONOMOUS REFLECTION & OPTIMIZATION LOOP:
       - If any member fails (Governing DCR > 1.0):
-        * Identify which elements or checks failed and why (`governing_limit_state`). Member flexure, shear, or axial failures call for a larger member. Joint shear, strong-column/weak-beam, and column confinement failures (`governing_member_type="frame"` or a column) call for larger columns. Story drift, stability, or slenderness failures call for stiffer members, usually larger columns and deeper beams.
+        * Identify which elements or checks failed and why (`governing_limit_state`). Member flexure, shear, or axial failures call for a larger member. Joint shear, strong-column/weak-beam, and column confinement failures (`governing_member_type="frame"` or a column) call for larger columns. Story drift, stability, or slenderness failures call for stiffer members, usually larger columns and deeper beams. A failing footing (`governing_member_type="footing"`) is not a member failure: `run_design` already sizes the footings, so it means no isolated footing within its range works (see `foundations.failing_footing_checks`); report it with its failing check instead of enlarging members for it.
         * Enlarge failing member sections using `modify_project`:
           - For rectangular sections: pass width 'b' and depth 'h' (e.g. `modify_project(sections=[{"id": "<sec_id>", "b": <new_b>, "h": <new_h>}])`).
           - For circular sections: pass diameter 'd' (e.g. `modify_project(sections=[{"id": "<sec_id>", "d": <new_d>}])`).
